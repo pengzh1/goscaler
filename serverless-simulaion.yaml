@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: serverless-simulation
+  labels:
+    app: serverless-simulation
+spec:
+  template:
+    metadata:
+      name: org.aliyun.serverless-simulation
+      labels:
+        app: org.aliyun.serverless-simulation
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: mytest
+          hostPath:
+            path: /Users/zhoupeng/Documents/mytest
+      containers:
+        - name: scaler
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v4.1
+          command: [ "./run.sh" ]
+        - name: serverless-simulator
+          image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.3
+          command: [ "./run.sh" ]
+          args: [ "mytest" ]
+          volumeMounts:
+            - name: mytest
+              mountPath: /tmp/data/mytest
