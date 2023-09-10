@@ -106,7 +106,10 @@ func (client *PlatformClient) Init(ctx context.Context, requestId, instanceId st
 		CreateTimeInMs:   int64(reply.CreateTime),
 		InitDurationInMs: int64(reply.InitDurationInMs),
 		Busy:             false,
+		CreateTime:       time.Now(),
 		LastIdleTime:     time.Now(),
+		LastStart:        time.Now(),
+		UseTime:          &[7200]uint16{},
 	}, nil
 }
 

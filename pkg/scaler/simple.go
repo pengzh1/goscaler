@@ -32,12 +32,15 @@ import (
 
 type Simple struct {
 	config         *config.Config
-	metaData       *model2.Meta
+	MetaData       *model2.Meta
 	platformClient platform_client2.Client
 	mu             sync.Mutex
 	wg             sync.WaitGroup
 	instances      map[string]*model2.Instance
 	idleInstance   *list.List
+	Cnt            int64
+	InitDuration   time.Duration
+	Exec           *[5]int
 }
 
 func New(metaData *model2.Meta, config *config.Config) Scaler {
@@ -47,12 +50,13 @@ func New(metaData *model2.Meta, config *config.Config) Scaler {
 	}
 	scheduler := &Simple{
 		config:         config,
-		metaData:       metaData,
+		MetaData:       metaData,
 		platformClient: client,
 		mu:             sync.Mutex{},
 		wg:             sync.WaitGroup{},
 		instances:      make(map[string]*model2.Instance),
 		idleInstance:   list.New(),
+		Exec:           &[5]int{},
 	}
 	log.Printf("New scaler for app: %s is created", metaData.Key)
 	scheduler.wg.Add(1)
@@ -69,17 +73,18 @@ func (s *Simple) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 	start := time.Now()
 	instanceId := uuid.New().String()
 	defer func() {
-		log.Printf("Assign, request id: %s, instance id: %s, cost %dms", request.RequestId, instanceId, time.Since(start).Milliseconds())
+		log.Printf("AssignEnd,%s,%s,%s,cost %dms", request.RequestId, request.MetaData.Key, instanceId, time.Since(start).Milliseconds())
 	}()
-	log.Printf("Assign, request id: %s", request.RequestId)
+	log.Printf("AssignStart,%s,%s", request.RequestId, request.MetaData.Key)
 	s.mu.Lock()
 	if element := s.idleInstance.Front(); element != nil {
 		instance := element.Value.(*model2.Instance)
 		instance.Busy = true
 		s.idleInstance.Remove(element)
 		s.mu.Unlock()
-		log.Printf("Assign, request id: %s, instance %s reused", request.RequestId, instance.Id)
+		log.Printf("AssignReuse,%s,%s,%s reused", request.RequestId, request.MetaData.Key, instance.Id)
 		instanceId = instance.Id
+		instance.LastStart = time.Now()
 		return &pb.AssignReply{
 			Status: pb.Status_Ok,
 			Assigment: &pb.Assignment{
@@ -93,6 +98,8 @@ func (s *Simple) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 	s.mu.Unlock()
 
 	//Create new Instance
+	log.Printf("AssignNew,%s,%s", request.RequestId, request.MetaData.Key)
+	creatStart := time.Now()
 	resourceConfig := model2.SlotResourceConfig{
 		ResourceConfig: pb.ResourceConfig{
 			MemoryInMegabytes: request.MetaData.MemoryInMb,
@@ -104,6 +111,8 @@ func (s *Simple) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 		log.Printf(errorMessage)
 		return nil, status.Errorf(codes.Internal, errorMessage)
 	}
+
+	log.Printf("AssignInit,%s,%s", request.RequestId, request.MetaData.Key)
 
 	meta := &model2.Meta{
 		Meta: pb.Meta{
@@ -122,9 +131,11 @@ func (s *Simple) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 	//add new instance
 	s.mu.Lock()
 	instance.Busy = true
+	instance.LastStart = time.Now()
 	s.instances[instance.Id] = instance
 	s.mu.Unlock()
-	log.Printf("request id: %s, instance %s for app %s is created, init latency: %dms", request.RequestId, instance.Id, instance.Meta.Key, instance.InitDurationInMs)
+	s.InitDuration = time.Since(creatStart)
+	log.Printf("AssignCreated,%s,%s,%dms", request.RequestId, instance.Meta.Key, time.Since(creatStart).Milliseconds())
 
 	return &pb.AssignReply{
 		Status: pb.Status_Ok,
@@ -148,7 +159,7 @@ func (s *Simple) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 	start := time.Now()
 	instanceId := request.Assigment.InstanceId
 	defer func() {
-		log.Printf("Idle, request id: %s, instance: %s, cost %dus", request.Assigment.RequestId, instanceId, time.Since(start).Microseconds())
+		log.Printf("IdleEnd,%s,%s,cost %dus", request.Assigment.RequestId, request.Assigment.MetaKey, time.Since(start).Microseconds())
 	}()
 	//log.Printf("Idle, request id: %s", request.Assigment.RequestId)
 	needDestroy := false
@@ -161,12 +172,15 @@ func (s *Simple) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 			s.deleteSlot(ctx, request.Assigment.RequestId, slotId, instanceId, request.Assigment.MetaKey, "bad instance")
 		}
 	}()
-	log.Printf("Idle, request id: %s", request.Assigment.RequestId)
+	log.Printf("IdleStart,%s,%s,", request.Assigment.RequestId, request.Assigment.MetaKey)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if instance := s.instances[instanceId]; instance != nil {
 		slotId = instance.Slot.Id
 		instance.LastIdleTime = time.Now()
+		s.Exec[int(s.Cnt)%len(s.Exec)] = int(time.Since(instance.LastStart).Milliseconds())
+		s.Cnt += 1
+		instance.UpdateActive(instance.LastStart, instance.LastIdleTime)
 		if needDestroy {
 			log.Printf("request id %s, instance %s need be destroy", request.Assigment.RequestId, instanceId)
 			return reply, nil
@@ -192,37 +206,99 @@ func (s *Simple) deleteSlot(ctx context.Context, requestId, slotId, instanceId, 
 	if err := s.platformClient.DestroySLot(ctx, requestId, slotId, reason); err != nil {
 		log.Printf("delete Instance %s (Slot: %s) of app: %s failed with: %s", instanceId, slotId, metaKey, err.Error())
 	}
+	log.Printf("delete Instance %s (Slot: %s) of app: %s succ", instanceId, slotId, metaKey)
 }
 
 func (s *Simple) gcLoop() {
-	log.Printf("gc loop for app: %s is started", s.metaData.Key)
-	ticker := time.NewTicker(s.config.GcInterval)
+	log.Printf("gc loop for app: %s is started", s.MetaData.Key)
+	ticker := time.NewTicker(1000 * time.Millisecond)
+	lastGc := time.Now()
+	lastUsageCheck := time.Now()
 	for range ticker.C {
 		for {
 			s.mu.Lock()
-			if element := s.idleInstance.Back(); element != nil {
-				instance := element.Value.(*model2.Instance)
-				idleDuration := time.Now().Sub(instance.LastIdleTime)
-				if idleDuration > s.config.IdleDurationBeforeGC {
-					//need GC
-					s.idleInstance.Remove(element)
-					delete(s.instances, instance.Id)
-					s.mu.Unlock()
-					go func() {
-						reason := fmt.Sprintf("Idle duration: %fs, excceed configured duration: %fs", idleDuration.Seconds(), s.config.IdleDurationBeforeGC.Seconds())
-						ctx := context.Background()
-						ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-						defer cancel()
-						s.deleteSlot(ctx, uuid.NewString(), instance.Slot.Id, instance.Id, instance.Meta.Key, reason)
-					}()
+			avgExec := s.GetAvgExec()
+			log.Printf("GcPreSize %s,%d,%d,%f,%v", s.MetaData.Key, len(s.instances), s.idleInstance.Len(), avgExec, s.Exec)
+			if time.Since(lastGc) > s.config.GetGcInterval(float32(s.InitDuration), avgExec) {
+				lastGc = time.Now()
+				if element := s.idleInstance.Back(); element != nil {
+					instance := element.Value.(*model2.Instance)
+					idleDuration := time.Now().Sub(instance.LastIdleTime)
+					if idleDuration > s.config.GetIdleDurationBeforeGC(float32(s.InitDuration), avgExec) {
+						log.Printf("Idle duration: %dms, time excceed configured: %dms", idleDuration.Milliseconds(),
+							s.config.GetIdleDurationBeforeGC(float32(s.InitDuration), avgExec))
+						//need GC
+						s.idleInstance.Remove(element)
+						delete(s.instances, instance.Id)
+						s.mu.Unlock()
+						go func() {
+							reason := fmt.Sprintf("Idle duration: %fs, excceed configured duration: %fs", idleDuration.Seconds(), s.config.IdleDurationBeforeGC.Seconds())
+							ctx := context.Background()
+							ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+							defer cancel()
+							s.deleteSlot(ctx, uuid.NewString(), instance.Slot.Id, instance.Id, instance.Meta.Key, reason)
+						}()
 
-					continue
+						continue
+					}
 				}
 			}
+			if time.Since(lastUsageCheck) > s.config.GetGcInterval(float32(s.InitDuration), avgExec) {
+				lastUsageCheck = time.Now()
+				if element := s.idleInstance.Back(); element != nil {
+					instance := element.Value.(*model2.Instance)
+					idleDuration := time.Now().Sub(instance.LastIdleTime)
+					usage := instance.CountUsage(20)
+					log.Printf("usageMeta %s,%f", s.MetaData.Key, usage)
+					if usage < s.config.GetUsageLimit() {
+						log.Printf("Idle duration: %fs, usage excceed configured: %f", idleDuration.Seconds(),
+							s.config.GetUsageLimit())
+						s.idleInstance.Remove(element)
+						delete(s.instances, instance.Id)
+						s.mu.Unlock()
+						go func() {
+							reason := fmt.Sprintf("Idle duration: %fs, usage excceed configured: %fs", idleDuration.Seconds(), s.config.GetUsageLimit())
+							ctx := context.Background()
+							ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+							defer cancel()
+							s.deleteSlot(ctx, uuid.NewString(), instance.Slot.Id, instance.Id, instance.Meta.Key, reason)
+						}()
+
+						continue
+					}
+				}
+			}
+			log.Printf("GcEndSize %s,%d,%d", s.MetaData.Key, len(s.instances), s.idleInstance.Len())
 			s.mu.Unlock()
 			break
 		}
 	}
+}
+
+func (s *Simple) GetAvgExec() float32 {
+	if s.Cnt < 1 {
+		return 0
+	}
+	execHis := float32(0)
+	cnt := float32(0)
+	for exec := range s.Exec {
+		if exec > 0 {
+			execHis += execHis
+			cnt += 1
+		}
+	}
+	avg := execHis / cnt
+	cur := time.Now()
+	for _, v := range s.instances {
+		if v.Busy {
+			duration := float32(cur.Sub(v.LastStart).Milliseconds())
+			if duration > avg {
+				execHis += duration * 1.2
+				cnt += 1
+			}
+		}
+	}
+	return execHis / cnt
 }
 
 func (s *Simple) Stats() Stats {

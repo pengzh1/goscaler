@@ -1,3 +1,6 @@
 /vendor/
+/vendorx/
 /scaler
+/tt.txt
+/.idea
 *.log

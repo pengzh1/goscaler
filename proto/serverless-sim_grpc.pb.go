@@ -4,7 +4,7 @@
 // - protoc             v4.24.3
 // source: serverless-sim.proto
 
-package schedulerproto
+package simulator
 
 import (
 	context "context"

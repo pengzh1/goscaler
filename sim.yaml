@@ -18,7 +18,7 @@ spec:
             path: /Users/zhoupeng/Documents/mytest
       containers:
         - name: scaler
-          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v4.1
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v4.4
           command: [ "./run.sh" ]
         - name: serverless-simulator
           image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.3

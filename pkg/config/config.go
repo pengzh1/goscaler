@@ -26,3 +26,30 @@ var DefaultConfig = Config{
 	GcInterval:           10 * time.Second,
 	IdleDurationBeforeGC: 40 * time.Second,
 }
+
+func (c *Config) GetGcInterval(initDuration float32, avgExec float32) time.Duration {
+	if avgExec > 1000 && avgExec/initDuration >= 1 {
+		return time.Second
+	}
+	return c.GcInterval
+}
+
+func (c *Config) GetIdleDurationBeforeGC(initDuration float32, avgExec float32) time.Duration {
+	if avgExec > 1000 && avgExec/initDuration >= 1 {
+		return time.Second
+	}
+	return c.IdleDurationBeforeGC
+}
+
+func (c *Config) GetUsageCheckInterval(avgExec float32) time.Duration {
+	if avgExec > 0 && avgExec < 100 {
+		return 2 * time.Second
+	} else if avgExec > 100 {
+		return time.Duration(int(avgExec*10/1000)+1) * time.Second
+	}
+	return 30 * time.Second
+}
+
+func (c *Config) GetUsageLimit() float32 {
+	return 0.2
+}

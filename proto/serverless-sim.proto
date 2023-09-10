@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package serverless.simulator;
-option go_package = "github.org/schedulerproto";
+option go_package = "github.org/serverless/simulator";
 
 
 service Scaler {
