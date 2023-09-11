@@ -31,15 +31,15 @@ type Instance struct {
 	CreateTimeInMs   int64
 	InitDurationInMs int64
 	Busy             bool
-	CreateTime       time.Time
-	LastIdleTime     time.Time
-	LastStart        time.Time
-	UseTime          *[7200]uint16
+	//CreateTime       time.Time
+	LastIdleTime time.Time
+	LastStart    time.Time
+	UseTime      *[7200]uint16
 }
 
-func (inst *Instance) UpdateActive(start time.Time, end time.Time) {
-	startMill := start.Sub(inst.CreateTime).Milliseconds()
-	endMill := end.Sub(inst.CreateTime).Milliseconds()
+func (inst *Instance) UpdateActive(start time.Time, end time.Time, sUse *[7200]uint16) {
+	startMill := start.Sub(CreateTime).Milliseconds()
+	endMill := end.Sub(CreateTime).Milliseconds()
 	if startMill/1000 != endMill/1000 {
 		log.Printf("updateActive %d %d %d", startMill, endMill, endMill-startMill)
 		for i := startMill / 1000; i <= endMill/1000; i++ {
@@ -50,15 +50,17 @@ func (inst *Instance) UpdateActive(start time.Time, end time.Time) {
 				use = int(endMill - i*1000)
 			}
 			inst.UseTime[i] += uint16(use)
+			sUse[i] += uint16(use)
 		}
 	} else {
 		log.Printf("updateActive %d %d", startMill/1000, endMill-startMill)
 		inst.UseTime[startMill/1000] += uint16(endMill - startMill)
+		sUse[startMill/1000] += uint16(endMill - startMill)
 	}
 }
 
 func (inst *Instance) CountUsage(secs int) float32 {
-	curSecs := int(time.Now().Sub(inst.CreateTime).Milliseconds() / 1000)
+	curSecs := int(time.Now().Sub(CreateTime).Milliseconds() / 1000)
 	if curSecs < secs/2 {
 		return 1
 	}
@@ -80,7 +82,7 @@ func (inst *Instance) CountUsage(secs int) float32 {
 		}
 	}
 	if inst.Busy {
-		useMills += int(time.Now().Sub(inst.CreateTime).Milliseconds())
+		useMills += int(time.Now().Sub(inst.LastStart).Milliseconds())
 	}
 	log.Printf("usageCount %d,%d,%d,%t,%d", curSecs, startSecs, useMills, haveMills, secCnt)
 	return float32(useMills) / float32(secs*1000)

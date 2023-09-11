@@ -17,8 +17,10 @@ import (
 	"github.com/AliyunContainerService/scaler/go/pkg/server"
 	"log"
 	"net"
+	"net/http"
 
 	"google.golang.org/grpc"
+	_ "net/http/pprof"
 
 	pb "github.com/AliyunContainerService/scaler/proto"
 )
@@ -32,6 +34,10 @@ func main() {
 	s := grpc.NewServer(grpc.MaxConcurrentStreams(1000))
 	pb.RegisterScalerServer(s, server.New())
 	log.Printf("server listening at %v", lis.Addr())
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}
