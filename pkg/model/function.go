@@ -24,6 +24,12 @@ type Meta struct {
 	pb.Meta
 }
 
+type CreateRet struct {
+	Instance *Instance
+	Err      error
+	Msg      string
+}
+
 type Instance struct {
 	Id               string
 	Slot             *Slot

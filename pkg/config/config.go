@@ -14,7 +14,6 @@ limitations under the License.
 package config
 
 import (
-	"github.com/AliyunContainerService/scaler/go/pkg/model"
 	"time"
 )
 
@@ -31,38 +30,38 @@ var DefaultConfig = Config{
 }
 
 func (c *Config) GetGcInterval(initDuration float32, avgExec float32) time.Duration {
-	if avgExec > 1000 && avgExec/initDuration >= 1 {
-		return 2 * time.Second
-	}
-
-	if avgExec > 500 && avgExec/initDuration >= 1 {
-		return 5 * time.Second
-	}
+	//if avgExec > 1000 && avgExec/initDuration >= 1 {
+	//	return 2 * time.Second
+	//}
+	//
+	//if avgExec > 500 && avgExec/initDuration >= 1 {
+	//	return 5 * time.Second
+	//}
 
 	return c.GcInterval
 }
 
 func (c *Config) GetIdleDurationBeforeGC(initDuration float32, avgExec float32, useTime *[7200]uint16) time.Duration {
-	if avgExec > 1000 && avgExec/initDuration >= 1 {
-		return 2 * time.Second
-	}
-	if avgExec > 500 && avgExec/initDuration >= 1 {
-		return 5 * time.Second
-	}
-	curSec := time.Now().Sub(model.CreateTime).Milliseconds() / 1000
-	start := curSec - 40
-	if start < 0 {
-		start = 0
-	}
-	cnt := int64(0)
-	for i := start; i < curSec; i++ {
-		if useTime[start] > 0 {
-			cnt += 1
-		}
-	}
-	if cnt > 1 && curSec-start > 5 {
-		return time.Duration(2*(curSec-start)/cnt) * time.Second
-	}
+	//if avgExec > 1000 && avgExec/initDuration >= 1 {
+	//	return 2 * time.Second
+	//}
+	//if avgExec > 500 && avgExec/initDuration >= 1 {
+	//	return 5 * time.Second
+	//}
+	//curSec := time.Now().Sub(model.CreateTime).Milliseconds() / 1000
+	//start := curSec - 40
+	//if start < 0 {
+	//	start = 0
+	//}
+	//cnt := int64(0)
+	//for i := start; i < curSec; i++ {
+	//	if useTime[start] > 0 {
+	//		cnt += 1
+	//	}
+	//}
+	//if cnt > 1 && curSec-start > 5 {
+	//	return time.Duration(2*(curSec-start)/cnt) * time.Second
+	//}
 
 	return c.IdleDurationBeforeGC
 }
