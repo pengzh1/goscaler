@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/status"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/AliyunContainerService/scaler/proto"
@@ -31,19 +32,19 @@ import (
 )
 
 type Simple struct {
-	config          *config.Config
-	MetaData        *model2.Meta
-	platformClient  platform_client2.Client
-	mu              sync.Mutex
-	wg              sync.WaitGroup
-	instances       map[string]*model2.Instance
-	idleInstance    *list.List
-	Cnt             int64
-	InitDuration    time.Duration
-	Exec            *[5]int
-	InitingInstance map[string]time.Time
-	UseTime         *[7200]uint16
-	IdleChan        chan *model2.CreateRet
+	config         *config.Config
+	MetaData       *model2.Meta
+	platformClient platform_client2.Client
+	mu             sync.Mutex
+	wg             sync.WaitGroup
+	instances      map[string]*model2.Instance
+	idleInstance   *list.List
+	Cnt            int64
+	InitDuration   time.Duration
+	Exec           *[5]int
+	OnInit         int32
+	UseTime        *[7200]uint16
+	IdleChan       chan *model2.CreateRet
 }
 
 func New(metaData *model2.Meta, config *config.Config) Scaler {
@@ -52,17 +53,17 @@ func New(metaData *model2.Meta, config *config.Config) Scaler {
 		log.Fatalf("client init with error: %s", err.Error())
 	}
 	scheduler := &Simple{
-		config:          config,
-		MetaData:        metaData,
-		platformClient:  client,
-		mu:              sync.Mutex{},
-		wg:              sync.WaitGroup{},
-		instances:       make(map[string]*model2.Instance),
-		idleInstance:    list.New(),
-		Exec:            &[5]int{},
-		InitingInstance: make(map[string]time.Time),
-		UseTime:         &[7200]uint16{},
-		IdleChan:        make(chan *model2.CreateRet, 1024),
+		config:         config,
+		MetaData:       metaData,
+		platformClient: client,
+		mu:             sync.Mutex{},
+		wg:             sync.WaitGroup{},
+		instances:      make(map[string]*model2.Instance),
+		idleInstance:   list.New(),
+		Exec:           &[5]int{},
+		OnInit:         0,
+		UseTime:        &[7200]uint16{},
+		IdleChan:       make(chan *model2.CreateRet),
 	}
 	log.Printf("New scaler for app: %s is created", metaData.Key)
 	scheduler.wg.Add(1)
@@ -104,12 +105,14 @@ func (s *Simple) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 	//Create new Instance
 	log.Printf("AssignNew,%s,%s", request.RequestId, request.MetaData.Key)
 	creatStart := time.Now()
-	s.InitingInstance[instanceId] = time.Now()
+	atomic.AddInt32(&s.OnInit, 1)
 	go s.CreateNew(instanceId, request.RequestId, s.MetaData)
 	var instance *model2.Instance
+	s.mu.Unlock()
 	select {
 	case createRet := <-s.IdleChan:
 		if createRet.Err != nil {
+			atomic.AddInt32(&s.OnInit, -1)
 			return nil, status.Errorf(codes.Internal, "createErr")
 		}
 		instance = createRet.Instance
@@ -119,7 +122,7 @@ func (s *Simple) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 	instance.Busy = true
 	instance.LastStart = time.Now()
 	s.instances[instance.Id] = instance
-	delete(s.InitingInstance, instanceId)
+	atomic.AddInt32(&s.OnInit, -1)
 	s.mu.Unlock()
 	s.InitDuration = time.Since(creatStart)
 	log.Printf("AssignCreated,%s,%s,%dms", request.RequestId, instance.Meta.Key, time.Since(creatStart).Milliseconds())
@@ -148,7 +151,7 @@ func (s *Simple) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 	defer func() {
 		log.Printf("IdleEnd,%s,%s,cost %dus", request.Assigment.RequestId, request.Assigment.MetaKey, time.Since(start).Microseconds())
 	}()
-	//log.Printf("Idle, request id: %s", request.Assigment.RequestId)
+	log.Printf("Idle, request id: %s", request.Assigment.RequestId)
 	needDestroy := false
 	slotId := ""
 	if request.Result != nil && request.Result.NeedDestroy != nil && *request.Result.NeedDestroy {
@@ -164,15 +167,14 @@ func (s *Simple) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 	if instance := s.instances[instanceId]; instance != nil {
 		slotId = instance.Slot.Id
 		instance.LastIdleTime = time.Now()
-		s.Exec[int(s.Cnt)%len(s.Exec)] = int(time.Since(instance.LastStart).Milliseconds())
-		s.Cnt += 1
-		instance.UpdateActive(instance.LastStart, instance.LastIdleTime, s.UseTime)
 		if needDestroy {
+			s.mu.Unlock()
 			log.Printf("request id %s, instance %s need be destroy", request.Assigment.RequestId, instanceId)
 			return reply, nil
 		}
 
 		if instance.Busy == false {
+			s.mu.Unlock()
 			log.Printf("request id %s, instance %s already freed", request.Assigment.RequestId, instanceId)
 			return reply, nil
 		}
@@ -241,35 +243,6 @@ func (s *Simple) gcLoop() {
 					cur = next
 				}
 			}
-			//if time.Since(lastUsageCheck) > s.config.GetUsageCheckInterval(avgExec) && s.idleInstance.Len() > 0 {
-			//	lastUsageCheck = time.Now()
-			//	cur := s.idleInstance.Front()
-			//	for {
-			//		next := cur.Next()
-			//		element := cur
-			//		instance := element.Value.(*model2.Instance)
-			//		idleDuration := time.Now().Sub(instance.LastIdleTime)
-			//		usage := instance.CountUsage(20)
-			//		log.Printf("usageMeta %s,%f", s.MetaData.Key, usage)
-			//		if usage < s.config.GetUsageLimit() {
-			//			log.Printf("Idle duration: %fs, usage excceed configured: %f", idleDuration.Seconds(),
-			//				usage)
-			//			s.idleInstance.Remove(element)
-			//			delete(s.instances, instance.Id)
-			//			go func() {
-			//				reason := fmt.Sprintf("Idle duration: %fs, usage excceed configured: %fs", idleDuration.Seconds(), s.config.GetUsageLimit())
-			//				ctx := context.Background()
-			//				ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			//				defer cancel()
-			//				s.deleteSlot(ctx, uuid.NewString(), instance.Slot.Id, instance.Id, instance.Meta.Key, reason)
-			//			}()
-			//		}
-			//		if next == nil {
-			//			break
-			//		}
-			//		cur = next
-			//	}
-			//}
 			log.Printf("GcEndSize %s,%d,%d", s.MetaData.Key, len(s.instances), s.idleInstance.Len())
 			s.mu.Unlock()
 			break
@@ -320,7 +293,6 @@ func (s *Simple) CreateNew(instanceId string, requestId string, meta *model2.Met
 		Err:      nil,
 		Msg:      "",
 	}
-	s.InitingInstance[instanceId] = time.Now()
 	//Create new Instance
 	log.Printf("AssignNew,%s,%s", requestId, meta.Key)
 	resourceConfig := model2.SlotResourceConfig{
@@ -334,8 +306,7 @@ func (s *Simple) CreateNew(instanceId string, requestId string, meta *model2.Met
 		log.Printf("createFailed:%s", errorMessage)
 		return
 	}
-	// c
-	if len(s.InitingInstance) < 1 && s.idleInstance.Len() < 1 {
+	if s.OnInit < 1 && s.idleInstance.Len() > 0 {
 		log.Printf("fastDelete:%s", meta.Key)
 		s.deleteSlot(ctx, requestId, slot.Id, instanceId, meta.Key, "fastDelete")
 		return
@@ -358,7 +329,7 @@ func (s *Simple) CreateNew(instanceId string, requestId string, meta *model2.Met
 	select {
 	case s.IdleChan <- result:
 		log.Printf("pushIdleSuc:%s", meta.Key)
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		log.Printf("fastDelete2:%s", meta.Key)
 		s.deleteSlot(ctx, requestId, slot.Id, instanceId, meta.Key, "fastDelete")
 	}
