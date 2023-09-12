@@ -16,17 +16,17 @@ package main
 import (
 	"github.com/AliyunContainerService/scaler/go/pkg/server"
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
 	"log"
 	"net"
 	"net/http"
-
-	"google.golang.org/grpc"
 	_ "net/http/pprof"
 
 	pb "github.com/AliyunContainerService/scaler/proto"
 )
 
 func main() {
+	//debug.SetGCPercent(1000)
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMicro
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	lis, err := net.Listen("tcp", ":9001")
