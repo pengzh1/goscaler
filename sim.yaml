@@ -49,12 +49,15 @@ spec:
             path: /Users/zhoupeng/Documents/mytest
       containers:
         - name: scaler
-          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v7.0.2
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v7.0.5
           command: [ "./run.sh" ]
+          env:
+            - name: "dev"
+              value: "true"
         - name: serverless-simulator
-          image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.3
+          image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.5
           command: [ "./run.sh" ]
-          args: [ "8b83S" ]
+          args: [ "dataSet_3" ]
           volumeMounts:
             - name: mytest
               mountPath: /tmp/data

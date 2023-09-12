@@ -20,7 +20,6 @@ import (
 	"github.com/AliyunContainerService/scaler/go/pkg/manager"
 	"github.com/AliyunContainerService/scaler/go/pkg/model"
 	pb "github.com/AliyunContainerService/scaler/proto"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -66,4 +65,8 @@ func (s *Server) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 		}, nil
 	}
 	return scheduler.Idle(ctx, request)
+}
+
+func (s *Server) GcLoop() {
+	s.mgr.GcLoop()
 }

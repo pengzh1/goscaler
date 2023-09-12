@@ -20,19 +20,22 @@ import (
 	scaler2 "github.com/AliyunContainerService/scaler/go/pkg/scaler"
 	"log"
 	"sync"
+	"time"
 )
 
 type Manager struct {
-	rw         sync.RWMutex
-	schedulers map[string]scaler2.Scaler
-	config     *config.Config
+	rw           sync.RWMutex
+	schedulers   map[string]*scaler2.Simple
+	resourceChan map[uint64]chan *model.Slot
+	config       *config.Config
 }
 
 func New(config *config.Config) *Manager {
 	return &Manager{
-		rw:         sync.RWMutex{},
-		schedulers: make(map[string]scaler2.Scaler),
-		config:     config,
+		rw:           sync.RWMutex{},
+		schedulers:   make(map[string]*scaler2.Simple),
+		resourceChan: make(map[uint64]chan *model.Slot),
+		config:       config,
 	}
 }
 
@@ -50,7 +53,10 @@ func (m *Manager) GetOrCreate(metaData *model.Meta) scaler2.Scaler {
 		return scheduler
 	}
 	log.Printf("Create new scaler for app %s", metaData.Key)
-	scheduler := scaler2.New(metaData, m.config)
+	if _, ok := m.resourceChan[metaData.MemoryInMb]; !ok {
+		m.resourceChan[metaData.MemoryInMb] = make(chan *model.Slot)
+	}
+	scheduler := scaler2.New(metaData, m.config, m.resourceChan[metaData.MemoryInMb])
 	m.schedulers[metaData.Key] = scheduler
 	m.rw.Unlock()
 	return scheduler
@@ -63,4 +69,19 @@ func (m *Manager) Get(metaKey string) (scaler2.Scaler, error) {
 		return scheduler, nil
 	}
 	return nil, fmt.Errorf("scaler of app: %s not found", metaKey)
+}
+
+func (m *Manager) GcLoop() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.rw.RLock()
+			for _, v := range m.schedulers {
+				v.GC()
+			}
+			m.rw.RUnlock()
+		}
+	}
 }

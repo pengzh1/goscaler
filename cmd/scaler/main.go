@@ -15,6 +15,7 @@ package main
 
 import (
 	"github.com/AliyunContainerService/scaler/go/pkg/server"
+	"github.com/rs/zerolog"
 	"log"
 	"net"
 	"net/http"
@@ -26,17 +27,21 @@ import (
 )
 
 func main() {
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMicro
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	lis, err := net.Listen("tcp", ":9001")
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
 	s := grpc.NewServer(grpc.MaxConcurrentStreams(1000))
-	pb.RegisterScalerServer(s, server.New())
+	scaleServer := server.New()
+	pb.RegisterScalerServer(s, scaleServer)
 	log.Printf("server listening at %v", lis.Addr())
+
 	go func() {
 		log.Println(http.ListenAndServe("localhost:6060", nil))
 	}()
+	go scaleServer.GcLoop()
 
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
