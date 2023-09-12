@@ -21,13 +21,17 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
+	"runtime"
+	"runtime/debug"
+	"time"
 
 	pb "github.com/AliyunContainerService/scaler/proto"
 )
 
 func main() {
-	//debug.SetGCPercent(1000)
-	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMicro
+	debug.SetGCPercent(-1)
+	zerolog.TimeFieldFormat = time.StampMicro
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	lis, err := net.Listen("tcp", ":9001")
 	if err != nil {
@@ -39,7 +43,13 @@ func main() {
 	log.Printf("server listening at %v", lis.Addr())
 
 	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
+		if os.Getenv("dev") == "true" {
+			log.Println(http.ListenAndServe("localhost:6060", nil))
+		} else {
+			runtime.SetCPUProfileRate(0)
+			runtime.SetBlockProfileRate(0)
+			runtime.SetMutexProfileFraction(0)
+		}
 	}()
 	go scaleServer.GcLoop()
 

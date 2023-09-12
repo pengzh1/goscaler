@@ -157,7 +157,7 @@ func (s *Simple) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 		defer func() {
 			m2.ReqLog(request.Assigment.RequestId, s.MetaData.Key, "", "IdleEnd", time.Since(start).Microseconds())
 		}()
-		m2.ReqLog(request.Assigment.RequestId, s.MetaData.Key, "", "IdleStart", time.Since(start).Microseconds())
+		m2.ReqLog(request.Assigment.RequestId, s.MetaData.Key, "", "IdleStart"+request.GetResult().String(), time.Since(start).Microseconds())
 	}
 	needDestroy := false
 	slotId := ""
@@ -166,7 +166,7 @@ func (s *Simple) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 	}
 	defer func() {
 		if needDestroy {
-			s.deleteSlot(ctx, request.Assigment.RequestId, slotId, instanceId, request.Assigment.MetaKey, "bad instance")
+			s.deleteSlot(ctx, uuid.NewString(), slotId, instanceId, request.Assigment.MetaKey, "bad instance")
 		}
 	}()
 	s.mu.Lock()
@@ -240,8 +240,6 @@ func (s *Simple) GC() {
 				go func() {
 					reason := fmt.Sprintf("Idle duration: %fs, excceed configured duration: %fs", idleDuration.Seconds(), s.config.IdleDurationBeforeGC.Seconds())
 					ctx := context.Background()
-					ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-					defer cancel()
 					s.deleteSlot(ctx, uuid.NewString(), instance.Slot.Id, instance.Id, instance.Meta.Key, reason)
 					m2.ReqLog("", s.MetaData.Key, instance.Id, "gcConsume", idleDuration.Milliseconds())
 				}()
@@ -250,6 +248,21 @@ func (s *Simple) GC() {
 				break
 			}
 			cur = next
+		}
+		going := true
+		for going {
+			select {
+			case instance := <-s.IdleChan:
+				if instance.Instance != nil {
+					go func() {
+						s.deleteSlot(context.Background(), uuid.NewString(), instance.Instance.Slot.Id, instance.Instance.Id, instance.Instance.Meta.Key, "waitChan")
+						m2.ReqLog("", s.MetaData.Key, instance.Instance.Id, "waitChanDelete", -1)
+					}()
+				}
+				continue
+			case <-time.Tick(20 * time.Millisecond):
+				going = false
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -306,17 +319,30 @@ func (s *Simple) CreateNew(instanceId string, requestId string, meta *m2.Meta) {
 		},
 	}
 	start := time.Now()
-	slot, err := s.platformClient.CreateSlot(ctx, requestId, &resourceConfig)
-	if err != nil {
-		errorMessage := fmt.Sprintf("create slot failed with: %s", err.Error())
-		m2.Printf("createFailed:%s", errorMessage)
-		return
+	var slot *m2.Slot
+	var err error
+	select {
+	case slot = <-s.SlotChan:
+	default:
+		slot, err = s.platformClient.CreateSlot(ctx, requestId, &resourceConfig)
+		if err != nil {
+			errorMessage := fmt.Sprintf("create slot failed with: %s", err.Error())
+			m2.Printf("createFailed:%s", errorMessage)
+			return
+		}
 	}
 	if s.OnInit < 1 && s.idleInstance.Len() > 0 {
-		m2.Printf("fastDelete:%s", meta.Key)
-		s.deleteSlot(ctx, requestId, slot.Id, instanceId, meta.Key, "fastDelete")
-		m2.ReqLog(requestId, s.MetaData.Key, instanceId, "fastConsume1", time.Since(start).Milliseconds())
-		return
+		tickDuration := 40 * time.Millisecond
+		select {
+		case s.SlotChan <- slot:
+			m2.ReqLog(requestId, s.MetaData.Key, instanceId, "fastConsume6", time.Since(start).Milliseconds())
+			return
+		case <-time.Tick(tickDuration):
+			m2.Printf("fastDelete:%s", meta.Key)
+			s.deleteSlot(ctx, uuid.NewString(), slot.Id, instanceId, meta.Key, "fastDelete")
+			m2.ReqLog(requestId, s.MetaData.Key, instanceId, "fastConsume1", time.Since(start).Milliseconds())
+			return
+		}
 	}
 	m2.Printf("AssignInit,%s,%s", requestId, meta.Key)
 	initRec := make(chan *m2.Instance)
@@ -342,8 +368,7 @@ func (s *Simple) CreateNew(instanceId string, requestId string, meta *m2.Meta) {
 					m2.Printf("pushIdleSuc:%s", meta.Key)
 					m2.ReqLog(requestId, s.MetaData.Key, instanceId, "initConsume", time.Since(start).Milliseconds())
 				case <-time.After(100 * time.Millisecond):
-					s.deleteSlot(ctx, requestId, slot.Id, instanceId, meta.Key, "fastDelete")
-					m2.Printf("fastConsume2,%s,%d", s.MetaData.Key, time.Since(start).Milliseconds())
+					s.deleteSlot(ctx, uuid.NewString(), slot.Id, instanceId, meta.Key, "fastDelete")
 					m2.ReqLog(requestId, s.MetaData.Key, instanceId, "fastConsume2", time.Since(start).Milliseconds())
 				}
 			}
@@ -351,11 +376,15 @@ func (s *Simple) CreateNew(instanceId string, requestId string, meta *m2.Meta) {
 			break
 		case <-time.Tick(100 * time.Millisecond):
 			if s.OnInit < 1 && s.idleInstance.Len() > 0 {
-				s.deleteSlot(ctx, requestId, slot.Id, instanceId, meta.Key, "fastDelete4")
+				s.deleteSlot(ctx, uuid.NewString(), slot.Id, instanceId, meta.Key, "fastDelete4")
 				m2.ReqLog(requestId, s.MetaData.Key, instanceId, "fastConsume4", time.Since(start).Milliseconds())
 				going = false
 				break
 			}
+		case <-time.Tick(120 * time.Second):
+			m2.ReqLog(requestId, s.MetaData.Key, instanceId, "goingFailed", -1)
+			going = false
+			break
 		}
 	}
 }
@@ -365,13 +394,18 @@ func (s *Simple) init(initRec chan *m2.Instance, requestId string, instId string
 	if err != nil {
 		errorMessage := fmt.Sprintf("create instance failed with: %s", err.Error())
 		m2.Printf(errorMessage)
+		select {
+		case initRec <- nil:
+		default:
+			m2.Printf("nilSendFailed")
+		}
 		return
 	}
 	select {
 	case initRec <- instance:
 		m2.Printf("initSendSuccess")
 	default:
-		deleted := s.deleteSlot(context.Background(), requestId, slot.Id, instId, rMeta.Key, "fastDelete3")
+		deleted := s.deleteSlot(context.Background(), uuid.NewString(), slot.Id, instId, rMeta.Key, "fastDelete3")
 		if deleted {
 			m2.ReqLog(requestId, s.MetaData.Key, instId, "fastConsume5", time.Since(start).Milliseconds())
 		}
