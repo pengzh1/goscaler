@@ -91,13 +91,12 @@ func (s *Simple) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 		instance := element.Value.(*m2.Instance)
 		instance.Busy = true
 		s.idleInstance.Remove(element)
+		instanceId = instance.Id
 		s.mu.Unlock()
 		m2.Printf("AssignReuse,%s,%s,%s reused", request.RequestId, request.MetaData.Key, instance.Id)
-		instanceId = instance.Id
+
 		if instance.LastIdleTime != instance.LastStart {
-
 			m2.Printf("reuseConsume,%s,%d", s.MetaData.Key, time.Since(instance.LastIdleTime).Milliseconds())
-
 		}
 		instance.LastStart = time.Now()
 		return &pb.AssignReply{
@@ -119,12 +118,14 @@ func (s *Simple) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 	s.mu.Unlock()
 	select {
 	case createRet := <-s.IdleChan:
+		atomic.AddInt32(&s.OnInit, -1)
 		if createRet.Err != nil {
 			atomic.AddInt32(&s.OnInit, -1)
 			return nil, status.Errorf(codes.Internal, "createErr")
 		}
 		instance = createRet.Instance
 	}
+	instanceId = instance.Id
 	if instance.LastIdleTime != instance.LastStart {
 		m2.Printf("waitConsume,%s,%d", s.MetaData.Key, time.Since(creatStart).Milliseconds())
 	}
@@ -135,10 +136,7 @@ func (s *Simple) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 		m2.Printf("reuseConsume,%s,%d", s.MetaData.Key, time.Since(instance.LastIdleTime).Milliseconds())
 	}
 	instance.LastStart = time.Now()
-	s.instances[instance.Id] = instance
-	atomic.AddInt32(&s.OnInit, -1)
 	s.mu.Unlock()
-	s.InitDuration = time.Since(creatStart)
 	m2.Printf("AssignCreated,%s,%s,%dms", request.RequestId, instance.Meta.Key, time.Since(creatStart).Milliseconds())
 	return &pb.AssignReply{
 		Status: pb.Status_Ok,
@@ -183,6 +181,7 @@ func (s *Simple) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 		slotId = instance.Slot.Id
 		instance.LastIdleTime = time.Now()
 		if needDestroy {
+			delete(s.instances, instanceId)
 			s.mu.Unlock()
 			m2.Printf("request id %s, instance %s need be destroy", request.Assigment.RequestId, instanceId)
 			return reply, nil
@@ -234,7 +233,7 @@ func (s *Simple) gcLoop() {
 	for range ticker.C {
 		for {
 			s.mu.Lock()
-			avgExec := s.GetAvgExec()
+			avgExec := float32(0)
 			m2.Printf("GcPreSize %s,%d,%d,%f,%v", s.MetaData.Key, len(s.instances), s.idleInstance.Len(), avgExec, s.Exec)
 			if time.Since(lastGc) > s.config.GetGcInterval(float32(s.InitDuration), avgExec) && s.idleInstance.Len() > 0 {
 				lastGc = time.Now()
@@ -353,6 +352,9 @@ func (s *Simple) CreateNew(instanceId string, requestId string, meta *m2.Meta) {
 				result.Instance = instance
 				select {
 				case s.IdleChan <- result:
+					s.mu.Lock()
+					s.instances[instance.Id] = instance
+					s.mu.Unlock()
 					m2.Printf("pushIdleSuc:%s", meta.Key)
 					m2.Printf("initConsume,%s,%d", s.MetaData.Key, time.Since(start).Milliseconds())
 				case <-time.After(100 * time.Millisecond):
@@ -361,14 +363,14 @@ func (s *Simple) CreateNew(instanceId string, requestId string, meta *m2.Meta) {
 				}
 			}
 			going = false
-		case <-time.Tick(50 * time.Millisecond):
-			if s.OnInit < 1 || s.idleInstance.Len() > 0 {
+			break
+		case <-time.Tick(100 * time.Millisecond):
+			if s.OnInit < 1 && s.idleInstance.Len() > 0 {
 				m2.Printf("fastConsume4,%s,%d", s.MetaData.Key, time.Since(start).Milliseconds())
 				s.deleteSlot(ctx, requestId, slot.Id, instanceId, meta.Key, "fastDelete4")
 				going = false
+				break
 			}
-		case <-time.After(360 * time.Second):
-			going = false
 		}
 	}
 }
