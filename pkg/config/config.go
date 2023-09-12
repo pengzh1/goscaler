@@ -14,6 +14,7 @@ limitations under the License.
 package config
 
 import (
+	model2 "github.com/AliyunContainerService/scaler/go/pkg/model"
 	"time"
 )
 
@@ -41,7 +42,7 @@ func (c *Config) GetGcInterval(initDuration float32, avgExec float32) time.Durat
 	return c.GcInterval
 }
 
-func (c *Config) GetIdleDurationBeforeGC(initDuration float32, avgExec float32, useTime *[7200]uint16) time.Duration {
+func (c *Config) GetIdleDurationBeforeGC(initDuration float32, avgExec float32, useTime *[7200]uint16, meta *model2.Meta) time.Duration {
 	//if avgExec > 1000 && avgExec/initDuration >= 1 {
 	//	return 2 * time.Second
 	//}
@@ -62,7 +63,6 @@ func (c *Config) GetIdleDurationBeforeGC(initDuration float32, avgExec float32, 
 	//if cnt > 1 && curSec-start > 5 {
 	//	return time.Duration(2*(curSec-start)/cnt) * time.Second
 	//}
-
 	return c.IdleDurationBeforeGC
 }
 

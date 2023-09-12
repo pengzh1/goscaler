@@ -1,5 +1,16 @@
 package model
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
-var CreateTime time.Time = time.Now()
+var CreateTime = time.Now()
+
+var Dev = true
+
+func Printf(format string, v ...interface{}) {
+	if Dev {
+		log.Printf(format, v...)
+	}
+}
