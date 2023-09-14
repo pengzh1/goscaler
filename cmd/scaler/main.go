@@ -37,7 +37,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-	s := grpc.NewServer(grpc.MaxConcurrentStreams(1000))
+	s := grpc.NewServer(grpc.MaxConcurrentStreams(1000),
+		grpc.InitialWindowSize(1024*1024),
+		grpc.InitialConnWindowSize(16*1024*1024),
+		grpc.ReadBufferSize(1024*512),
+		grpc.WriteBufferSize(1024*512))
 	scaleServer := server.New()
 	pb.RegisterScalerServer(s, scaleServer)
 	log.Printf("server listening at %v", lis.Addr())
@@ -51,7 +55,6 @@ func main() {
 			runtime.SetMutexProfileFraction(0)
 		}
 	}()
-	go scaleServer.GcLoop()
 
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)

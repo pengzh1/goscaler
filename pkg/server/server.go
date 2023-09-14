@@ -17,8 +17,8 @@ import (
 	"context"
 	"fmt"
 	"github.com/AliyunContainerService/scaler/go/pkg/config"
-	"github.com/AliyunContainerService/scaler/go/pkg/manager"
 	"github.com/AliyunContainerService/scaler/go/pkg/model"
+	"github.com/AliyunContainerService/scaler/go/pkg/scaler"
 	pb "github.com/AliyunContainerService/scaler/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -26,12 +26,12 @@ import (
 
 type Server struct {
 	pb.UnimplementedScalerServer
-	mgr *manager.Manager
+	mgr *scaler.Dispatcher
 }
 
 func New() *Server {
 	return &Server{
-		mgr: manager.New(&config.DefaultConfig),
+		mgr: scaler.RunDispatcher(context.Background(), &config.DefaultConfig),
 	}
 }
 
@@ -56,8 +56,8 @@ func (s *Server) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 		return nil, status.Errorf(codes.InvalidArgument, fmt.Sprintf("assignment is nil"))
 	}
 	key := request.Assigment.MetaKey
-	scheduler, err := s.mgr.Get(key)
-	if err != nil {
+	scheduler, ok := s.mgr.Get(key)
+	if !ok {
 		errorMessage := fmt.Sprintf("scaler for app: %s not found", key)
 		return &pb.IdleReply{
 			Status:       pb.Status_InternalError,
@@ -65,8 +65,4 @@ func (s *Server) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleRep
 		}, nil
 	}
 	return scheduler.Idle(ctx, request)
-}
-
-func (s *Server) GcLoop() {
-	s.mgr.GcLoop()
 }

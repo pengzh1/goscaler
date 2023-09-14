@@ -27,5 +27,4 @@ type Stats struct {
 type Scaler interface {
 	Assign(ctx context.Context, request *pb.AssignRequest) (*pb.AssignReply, error)
 	Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleReply, error)
-	Stats() Stats
 }

@@ -83,11 +83,16 @@ spec:
             path: /Users/zhoupeng/Documents/mytest
       containers:
         - name: scaler
-          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v7.1.1
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v8.0.4
           command: [ "./run.sh" ]
           env:
             - name: "dev"
               value: "true"
+          ports:
+            - containerPort: 6060
+              hostPort: 30060
+              name: pprof
+              protocol: TCP
         - name: serverless-simulator
           image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.5
           command: [ "./run.sh" ]
