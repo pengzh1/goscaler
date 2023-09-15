@@ -17,6 +17,7 @@ import (
 type Dispatcher struct {
 	WaitCheckChan chan *CreateEvent
 	DeleteChan    chan *DeleteEvent
+	GcChan        chan *BaseScheduler
 	ScalerMap     sync.Map
 	Deleted       sync.Map
 	rw            sync.RWMutex
@@ -25,15 +26,37 @@ type Dispatcher struct {
 
 func RunDispatcher(ctx context.Context, config *config.Config) *Dispatcher {
 	dispatcher := &Dispatcher{
-		WaitCheckChan: make(chan *CreateEvent, 1024),
-		DeleteChan:    make(chan *DeleteEvent, 1024),
+		WaitCheckChan: make(chan *CreateEvent, 10240),
+		DeleteChan:    make(chan *DeleteEvent, 10240),
+		GcChan:        make(chan *BaseScheduler, 1024),
 		ScalerMap:     sync.Map{},
 		Deleted:       sync.Map{},
+		config:        config,
 	}
-	for i := 0; i < 150; i++ {
-		go dispatcher.runWorker(ctx, config.ClientAddr)
+	for i := 0; i < 20; i++ {
+		go dispatcher.runCreateHandler(ctx, config.ClientAddr, i)
 	}
-	go dispatcher.runChecker(ctx)
+	for i := 0; i < 10; i++ {
+		go dispatcher.runDeleteHandler(ctx, config.ClientAddr, i)
+	}
+	for i := 0; i < 10; i++ {
+		go dispatcher.runGcChecker(ctx)
+	}
+	go func() {
+		tick := time.NewTicker(100 * time.Millisecond)
+		for {
+			select {
+			case <-tick.C:
+				dispatcher.ScalerMap.Range(func(key, value any) bool {
+					if value != nil {
+						scaler := value.(*BaseScheduler)
+						dispatcher.GcChan <- scaler
+					}
+					return true
+				})
+			}
+		}
+	}()
 	return dispatcher
 }
 
@@ -54,7 +77,7 @@ type DeleteEvent struct {
 	Reason     string
 }
 
-func (d *Dispatcher) runWorker(ctx context.Context, ClientAddr string) {
+func (d *Dispatcher) runCreateHandler(ctx context.Context, ClientAddr string, id int) {
 	client, err := platform_client2.New(ClientAddr)
 	if err != nil {
 		log.Fatal().Msg("client init with error" + err.Error())
@@ -62,51 +85,95 @@ func (d *Dispatcher) runWorker(ctx context.Context, ClientAddr string) {
 	for {
 		select {
 		case checkEvent := <-d.WaitCheckChan:
-			m2.Printf("newCheck")
+			start := time.Now()
 			d.checkWait(checkEvent.Scaler, checkEvent.RequestId, checkEvent.InstanceId, client.(*platform_client2.PlatformClient))
+			m2.Printf("worker%d check runEnd %dus", id, time.Since(start).Microseconds())
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+func (d *Dispatcher) runDeleteHandler(ctx context.Context, ClientAddr string, id int) {
+	client, err := platform_client2.New(ClientAddr)
+	if err != nil {
+		log.Fatal().Msg("client init with error" + err.Error())
+	}
+	for {
+		select {
 		case delEvent := <-d.DeleteChan:
-			m2.Printf("delEvent")
+			start := time.Now()
 			d.deleteSlot(delEvent.RequestId, delEvent.SlotId, delEvent.InstanceId, delEvent.MetaKey, delEvent.Reason, client.(*platform_client2.PlatformClient))
+			m2.Printf("worker%d del runEnd %dus", id, time.Since(start).Microseconds())
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func (d *Dispatcher) runChecker(ctx context.Context) {
-	tick := time.NewTicker(2 * time.Second)
+func (d *Dispatcher) runGcChecker(ctx context.Context) {
 	for {
 		select {
-		case <-tick.C:
-			d.ScalerMap.Range(func(key, value any) bool {
-				s := value.(*BaseScheduler)
-				// onCreate小于onWait，触发一次创建检查事件
-				if s.OnCreate.Load() < s.OnWait.Load() {
-					createEvent := &CreateEvent{
-						InstanceId: "sup" + uuid.NewString(),
-						RequestId:  uuid.NewString(),
-						Scaler:     s,
-					}
-					d.WaitCheckChan <- createEvent
-					log.Printf("supplementCreate" + s.MetaData.Key)
-					return true
+		case s := <-d.GcChan:
+			start := time.Now()
+			if s.OnCreate.Load() < s.OnWait.Load() && s.OnCreate.Load() < 100 {
+				// 1.onCreate小于onWait，触发一次创建检查事件
+				createEvent := &CreateEvent{
+					InstanceId: "sup" + uuid.NewString(),
+					RequestId:  uuid.NewString(),
+					Scaler:     s,
 				}
-				// onWait=0，检查idleChan是否已清空
-				if s.OnWait.Load() == 0 {
-					for {
-						select {
-						case ret := <-s.IdleChan:
-							d.transferDelete("sup"+uuid.NewString(), ret.Instance.Slot.Id, ret.Instance.Id, s.MetaData.Key, "sup")
-							log.Printf("supplementCreate %s,%s,%s", s.MetaData.Key, ret.Instance.Id, ret.Instance.Slot.Id)
-						default:
+				d.WaitCheckChan <- createEvent
+				m2.Printf("supplementCreate" + s.MetaData.Key)
+				m2.Printf("gcRunEnd%s,%dus", s.MetaData.Key, time.Since(start).Microseconds())
+				continue
+			} else if s.OnWait.Load() == 0 {
+				// 2.onWait=0，检查idleChan是否已清空
+			loop:
+				for {
+					select {
+					case ret := <-s.IdleChan:
+						s.IdleSize.Add(-1)
+						d.transferDelete("sup"+uuid.NewString(), ret.Instance.Slot.Id, ret.Instance.Id, s.MetaData.Key, "sup")
+						m2.Printf("supplementDelete %s,%s,%s", s.MetaData.Key, ret.Instance.Id, ret.Instance.Slot.Id)
+					default:
+						break loop
+					}
+				}
+			}
+			// 3.gc
+			d.GC(s)
+			// 4.onWait<onCreate，通知较新的create协程尽快销毁实例
+			if s.OnWait.Load() < s.OnCreate.Load() {
+				s.CheckLock.Lock()
+				if s.OnWait.Load() < s.OnCreate.Load() {
+					var arr []int64
+					s.CheckChan.Range(func(key, value any) bool {
+						arr = append(arr, key.(int64))
+						return true
+					})
+					sort.Slice(arr, func(i, j int) bool {
+						return arr[i] < arr[j]
+					})
+					size := s.OnWait.Load()
+					if size < int32(len(arr)) {
+						dropIdx := arr[size]
+						s.CheckChan.Range(func(key, value any) bool {
+							m2.Printf("sendCheck")
+							if key.(int64) >= dropIdx {
+								select {
+								case value.(chan struct{}) <- struct{}{}:
+									m2.Printf("sendCheckSuc")
+								default:
+									m2.Printf("sendCheckDrop")
+								}
+							}
 							return true
-						}
+						})
 					}
 				}
-				// gc
-				d.GC(s)
-				return true
-			})
+				s.CheckLock.Unlock()
+			}
+			m2.Printf("gcRunEnd%s,%dus", s.MetaData.Key, time.Since(start).Microseconds())
 		case <-ctx.Done():
 			return
 		}
@@ -120,6 +187,8 @@ func (d *Dispatcher) Fetch(instanceId string, requestId string, meta *m2.Meta) *
 	// 2.从idle中获取，有则直接返回
 	instance := d.getFromIdle(s, requestId)
 	if instance != nil {
+		instance.Busy = true
+		instance.LastStart = time.Now()
 		return instance
 	}
 	createEvent := &CreateEvent{
@@ -127,38 +196,49 @@ func (d *Dispatcher) Fetch(instanceId string, requestId string, meta *m2.Meta) *
 		RequestId:  requestId,
 		Scaler:     s,
 	}
-	// 3.idle中获取不到，增加预期实例数，触发一次实例创建检查
+	// 3.尝试从idleChan中获取，超时时间40ms
 	s.OnWait.Add(1)
-	d.WaitCheckChan <- createEvent
-	// 4.等待从IdleChan中接收实例，接收到后减少预期实例数
-	instanceRet := <-s.IdleChan
-	instanceRet.Instance.Busy = true
-	s.OnWait.Add(-1)
-	// 5.预期实例数发生变动，通知所有初始化协程
-	s.CheckLock.Lock()
-	if s.OnWait.Load() < s.OnCreate.Load() {
-		var arr []int64
-		s.CheckChan.Range(func(key, value any) bool {
-			arr = append(arr, key.(int64))
-			return true
-		})
-		sort.Slice(arr, func(i, j int) bool {
-			return i < j
-		})
-		size := s.OnWait.Load()
-		if size < int32(len(arr)) {
-			dropIdx := arr[size]
-			s.CheckChan.Range(func(key, value any) bool {
-				m2.Printf("sendCheck")
-				if key.(int64) > dropIdx {
-					value.(chan struct{}) <- struct{}{}
-				}
-				return true
-			})
+	defer s.OnWait.Add(-1)
+	if s.InstanceSize.Load() < 1 {
+		// 4.idle中获取不到，增加预期实例数，触发一次实例创建检查
+		if s.OnCreate.Load() < s.OnWait.Load() {
+			d.WaitCheckChan <- createEvent
+		}
+		// 5.等待从IdleChan中接收实例，接收到后减少预期实例数
+		instanceRet := <-s.IdleChan
+		s.IdleSize.Add(-1)
+		instanceRet.Instance.Busy = true
+		return instanceRet.Instance
+	}
+	tick := time.NewTimer(40 * time.Millisecond)
+	select {
+	case instanceRet := <-s.IdleChan:
+		s.IdleSize.Add(-1)
+		m2.Printf("fastReturn")
+		instanceRet.Instance.Busy = true
+		instanceRet.Instance.LastStart = time.Now()
+		return instanceRet.Instance
+	case <-tick.C:
+		m2.Printf("waitTimeout")
+		select {
+		case instanceRet := <-s.IdleChan:
+			s.IdleSize.Add(-1)
+			m2.Printf("fastReturn")
+			instanceRet.Instance.Busy = true
+			instanceRet.Instance.LastStart = time.Now()
+			return instanceRet.Instance
+		default:
+			// 4.idle中获取不到，增加预期实例数，触发一次实例创建检查
+			if s.OnCreate.Load() < s.OnWait.Load() {
+				d.WaitCheckChan <- createEvent
+			}
+			// 5.等待从IdleChan中接收实例，接收到后减少预期实例数
+			instanceRet := <-s.IdleChan
+			s.IdleSize.Add(-1)
+			instanceRet.Instance.Busy = true
+			return instanceRet.Instance
 		}
 	}
-	s.CheckLock.Unlock()
-	return instanceRet.Instance
 }
 
 func (d *Dispatcher) Idle(instanceId, requestId, meta, reason string, needDelete bool) error {
@@ -175,14 +255,20 @@ func (d *Dispatcher) Idle(instanceId, requestId, meta, reason string, needDelete
 			return nil
 		}
 		instance.Busy = false
+		instance.LastIdleTime = time.Now()
 		idleInstance := &m2.CreateRet{
 			Instance: instance,
 		}
 		// onWait大于0时，直接推送IdleChan，否则保存到idleInstances链表
 		if s.OnWait.Load() > 0 {
+			m2.Printf("pushIdleChan")
 			s.IdleChan <- idleInstance
+			s.IdleSize.Add(1)
 		} else {
+			s.Lock.Lock()
+			m2.Printf("pushFront")
 			s.idleInstance.PushFront(instance)
+			s.Lock.Unlock()
 		}
 	}
 	return nil
@@ -197,7 +283,7 @@ func (d *Dispatcher) GetOrCreate(metaData *m2.Meta) Scaler {
 		d.rw.Unlock()
 		return s.(*BaseScheduler)
 	}
-	log.Printf("Create new scaler for app %s", metaData.Key)
+	m2.Printf("Create new scaler for app %s", metaData.Key)
 	scheduler := NewBaseScheduler(metaData, d.config, d)
 	d.ScalerMap.Store(metaData.Key, scheduler)
 	d.rw.Unlock()
@@ -216,6 +302,7 @@ func (d *Dispatcher) checkWait(s *BaseScheduler, reqId, instId string, client *p
 		for {
 			select {
 			case idle := <-s.IdleChan:
+				s.IdleSize.Add(-1)
 				if idle != nil {
 					d.transferDelete(uuid.NewString(), idle.Instance.Slot.Id, idle.Instance.Id, s.MetaData.Key, "bad instance")
 				}
@@ -225,9 +312,9 @@ func (d *Dispatcher) checkWait(s *BaseScheduler, reqId, instId string, client *p
 			}
 		}
 	}
-	// 2.onWait小于OnCreate，本次不创建实例，直接返回
-	if s.OnCreate.Load() >= s.OnWait.Load() {
-		log.Printf("dropCreateEvent:" + s.MetaData.Key)
+	// 2.onWait小于OnCreate，或onCrete大于1000，本次不创建实例，直接返回
+	if s.OnCreate.Load() > s.OnWait.Load() || s.OnCreate.Load() > 100 {
+		m2.Printf("dropCreateEvent:" + s.MetaData.Key)
 		return
 	}
 	// 3.onWait大于OnCreate，尝试从idle中获取, 获取到则往idleChan推送
@@ -236,12 +323,13 @@ func (d *Dispatcher) checkWait(s *BaseScheduler, reqId, instId string, client *p
 		m2.Printf("quickIdle")
 		idle.Instance = it
 		s.IdleChan <- idle
+		s.IdleSize.Add(1)
 		return
 	}
 	// 4.onWait大于OnCreate，idle也为空，则开启创建协程，增加OnCreate数量
 	idx := time.Now().UnixNano()
 	// 用于接收实例可用数量变化推送, 在不需要实例的情况下，直接快速销毁当前初始化中的实例
-	cc := make(chan struct{}, 200)
+	cc := make(chan struct{}, 1)
 	s.OnCreate.Add(1)
 	s.CheckChan.Store(idx, cc)
 	go func() {
@@ -272,12 +360,19 @@ func (d *Dispatcher) deleteSlot(reqId, slotId, instanceId, metaKey, reason strin
 	}
 	m2.ReqLog(reqId, metaKey, instanceId, "deleteInstanceStart", -1)
 	if inst, ok := d.ScalerMap.Load(metaKey); ok {
-		inst.(*BaseScheduler).instances.Delete(instanceId)
+		s := inst.(*BaseScheduler)
+		if _, ok := s.instances.LoadAndDelete(instanceId); ok {
+			s.InstanceSize.Add(-1)
+		}
+
 	}
-	if err := client.DestroySLot(context.Background(), reqId, slotId, reason); err != nil {
-		m2.Printf("delete Instance %s (Slot: %s) of app: %s failed with: %s", instanceId, slotId, metaKey, err.Error())
-		d.Deleted.Store(slotId, true)
-	}
+	go func() {
+		err := client.DestroySLot(context.Background(), reqId, slotId, reason)
+		if err != nil {
+			m2.Printf("deleteEnd" + err.Error())
+		}
+	}()
+	d.Deleted.Store(slotId, true)
 	m2.ReqLog(reqId, metaKey, instanceId, "deleteInstanceEnd", time.Since(start).Milliseconds())
 }
 
@@ -337,13 +432,17 @@ func (d *Dispatcher) CreateNew(ctx context.Context, instanceId, requestId string
 				}
 				result.Instance = instance
 				s.instances.Store(instance.Id, instance)
+				s.InstanceSize.Add(1)
 				s.IdleChan <- result
+				s.IdleSize.Add(1)
 				m2.Printf("sendSuc")
 				return
 			} else {
 				return
 			}
 		case <-check:
+			idx := d.getInitIndex(s, id) + 1
+			m2.Printf("checkIdx %s,%d,%d", requestId, idx, s.OnWait.Load())
 			// 3.2 接收到实例数变动消息，检查initIndex 是否大于onWait数量，大于则直接销毁当前实例
 			if d.getInitIndex(s, id)+1 > int(s.OnWait.Load()) {
 				d.transferDelete(uuid.NewString(), slot.Id, instanceId, s.MetaData.Key, "fastDelete4")
@@ -374,6 +473,7 @@ func (d *Dispatcher) getFromIdle(s *BaseScheduler, reqId string) *m2.Instance {
 			m2.ReqLog(reqId, s.MetaData.Key, instance.Id, "reuseConsume2", time.Since(instance.LastIdleTime).Milliseconds())
 		}
 		instance.LastStart = time.Now()
+		m2.Printf("getFromIdleSuc")
 		return instance
 	}
 	s.Lock.Unlock()
@@ -413,8 +513,8 @@ func (d *Dispatcher) init(initRec chan *m2.Instance, requestId string, instId st
 
 func (d *Dispatcher) GC(s *BaseScheduler) {
 	s.Lock.Lock()
-	m2.Printf("GcPreSize %s,%d", s.MetaData.Key, s.idleInstance.Len())
 	if time.Since(s.LastGc) > s.GetGcInterval() && s.idleInstance.Len() > 0 {
+		m2.Printf("GcPreSize %s,%d,%d,%d,%d,%d", s.MetaData.Key, s.idleInstance.Len(), s.IdleSize.Load(), s.OnWait.Load(), s.OnCreate.Load(), s.InstanceSize.Load())
 		s.LastGc = time.Now()
 		cur := s.idleInstance.Front()
 		for {
@@ -433,7 +533,7 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 			}
 			cur = next
 		}
-		m2.Printf("GcEndSize %s,%d,%d", s.MetaData.Key, s.idleInstance.Len())
-		s.Lock.Unlock()
+		m2.Printf("GcEndSize %s,%d,%d,%d,%d,%d", s.MetaData.Key, s.idleInstance.Len(), s.IdleSize.Load(), s.OnWait.Load(), s.OnCreate.Load(), s.InstanceSize.Load())
 	}
+	s.Lock.Unlock()
 }

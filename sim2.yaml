@@ -66,15 +66,15 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: $NAME
+  name: sim9
   labels:
-    app: $NAME
+    app: sim9
 spec:
   template:
     metadata:
-      name: $NAME
+      name: sim9
       labels:
-        app: $NAME
+        app: sim9
     spec:
       restartPolicy: Never
       volumes:
@@ -83,7 +83,7 @@ spec:
             path: /Users/zhoupeng/Documents/mytest
       containers:
         - name: scaler
-          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:$VERSION
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v823
           command: [ "./run.sh" ]
           env:
             - name: "dev"
@@ -96,7 +96,7 @@ spec:
         - name: serverless-simulator
           image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.5
           command: [ "./run.sh" ]
-          args: [ "$DATA" ]
+          args: [ "dataSet_3" ]
           volumeMounts:
             - name: mytest
               mountPath: /tmp/data

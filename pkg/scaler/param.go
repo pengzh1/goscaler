@@ -12,8 +12,7 @@ func (s *BaseScheduler) GetGcInterval() time.Duration {
 	//if avgExec > 500 && avgExec/initDuration >= 1 {
 	//	return 5 * time.Second
 	//}
-
-	return s.config.GcInterval
+	return 2 * time.Second
 }
 
 func (s *BaseScheduler) GetIdleDurationBeforeGC() time.Duration {

@@ -15,6 +15,7 @@ package main
 
 import (
 	"github.com/AliyunContainerService/scaler/go/pkg/server"
+	pb "github.com/AliyunContainerService/scaler/proto"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"log"
@@ -23,15 +24,11 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"runtime"
-	"runtime/debug"
-	"time"
-
-	pb "github.com/AliyunContainerService/scaler/proto"
 )
 
 func main() {
-	debug.SetGCPercent(-1)
-	zerolog.TimeFieldFormat = time.StampMicro
+	//debug.SetGCPercent(200)
+	zerolog.TimeFieldFormat = "15:04:05.000000"
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	lis, err := net.Listen("tcp", ":9001")
 	if err != nil {
@@ -40,8 +37,9 @@ func main() {
 	s := grpc.NewServer(grpc.MaxConcurrentStreams(1000),
 		grpc.InitialWindowSize(1024*1024),
 		grpc.InitialConnWindowSize(16*1024*1024),
-		grpc.ReadBufferSize(1024*512),
-		grpc.WriteBufferSize(1024*512))
+		//grpc.ReadBufferSize(1024*512),
+		//grpc.WriteBufferSize(1024*512)
+	)
 	scaleServer := server.New()
 	pb.RegisterScalerServer(s, scaleServer)
 	log.Printf("server listening at %v", lis.Addr())

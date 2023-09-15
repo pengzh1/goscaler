@@ -18,10 +18,10 @@ binary: proto
 	go build -o scaler cmd/scaler/main.go
 
 docker-build: proto
-#	manifest/make-rules/manifest.sh /edge-proxy:  
+#	manifest/make-rules/manifest.sh ${IMAGE_REPO}/edge-proxy:${GIT_VERSION} ${DOCKER_USERNAME} ${DOCKER_PASSWD}
 	docker buildx build --push --platform linux/amd64 \
     --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64  \
-    -f Dockerfile . -t registry.cn-hangzhou.aliyuncs.com/beeper/scaler:
+    -f Dockerfile . -t registry.cn-hangzhou.aliyuncs.com/beeper/scaler:$VERSION
 
 
 proto:

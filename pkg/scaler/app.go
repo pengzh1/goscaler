@@ -34,10 +34,13 @@ type BaseScheduler struct {
 	MetaData     *m2.Meta
 	Lock         sync.Mutex
 	CheckLock    sync.Mutex
+	IdleLock     sync.Mutex
 	instances    sync.Map
 	idleInstance *list.List
 	OnWait       atomic.Int32
 	OnCreate     atomic.Int32
+	IdleSize     atomic.Int32
+	InstanceSize atomic.Int32
 	IdleChan     chan *m2.CreateRet
 	CheckChan    sync.Map // key timestamp int64 value chan struct{}
 	LastGc       time.Time
@@ -53,6 +56,8 @@ func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *
 		idleInstance: list.New(),
 		OnWait:       atomic.Int32{},
 		OnCreate:     atomic.Int32{},
+		IdleSize:     atomic.Int32{},
+		InstanceSize: atomic.Int32{},
 		IdleChan:     make(chan *m2.CreateRet, 1024),
 		CheckChan:    sync.Map{},
 		LastGc:       time.Now(),

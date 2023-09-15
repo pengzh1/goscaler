@@ -34,10 +34,9 @@ type PlatformClient struct {
 }
 
 func New(addr string) (Client, error) {
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithWriteBufferSize(0),
-		grpc.WithReadBufferSize(0),
-	)
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials())) //grpc.WithWriteBufferSize(0),
+	//grpc.WithReadBufferSize(0),
+
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 		return nil, err
@@ -78,7 +77,9 @@ func (client *PlatformClient) DestroySLot(ctx context.Context, requestId, slotId
 		Id:        slotId,
 		Reason:    &reason,
 	}
+	start := time.Now()
 	reply, err := client.c.DestroySlot(ctx, req)
+	model2.Printf("delSuc:%s,%dus", requestId, time.Since(start).Microseconds())
 	if err != nil {
 		return err
 	}
