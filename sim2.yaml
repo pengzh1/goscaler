@@ -19,7 +19,7 @@ spec:
             path: /Users/zhoupeng/Documents/mytest
       containers:
         - name: scaler
-          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v856
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v860
           command: [ "./run.sh" ]
           env:
             - name: "dev"
@@ -52,7 +52,7 @@ spec:
             path: /Users/zhoupeng/Documents/mytest
       containers:
         - name: scaler
-          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v856
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v860
           command: [ "./run.sh" ]
           env:
             - name: "dev"
@@ -61,6 +61,39 @@ spec:
           image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.5
           command: [ "./run.sh" ]
           args: [ "ds2a" ]
+          volumeMounts:
+            - name: mytest
+              mountPath: /tmp/data
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sim3
+  labels:
+    app: sim3
+spec:
+  template:
+    metadata:
+      name: sim3
+      labels:
+        app: sim3
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: mytest
+          hostPath:
+            path: /Users/zhoupeng/Documents/mytest
+      containers:
+        - name: scaler
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v860
+          command: [ "./run.sh" ]
+          env:
+            - name: "dev"
+              value: "true"
+        - name: serverless-simulator
+          image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.5
+          command: [ "./run.sh" ]
+          args: [ "8b83S" ]
           volumeMounts:
             - name: mytest
               mountPath: /tmp/data

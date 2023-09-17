@@ -136,21 +136,26 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 		m2.Printf("GcEndSize %s,%d,%d,%d,%d,%d", s.MetaData.Key, s.idleInstance.Len(), s.IdleSize.Load(), s.OnWait.Load(), s.OnCreate.Load(), s.InstanceSize.Load())
 		if preSize > 0 && s.InstanceSize.Load() == 0 {
 			if s.Rule.Valid && s.Rule.PreWarmMs > 0 && s.Rule.KeepAliveMs > 0 && s.Rule.GcSec > 0 {
-				createEvent := &CreateEvent{
-					InstanceId: uuid.NewString(),
-					RequestId:  s.Rule.Cate + uuid.NewString(),
-					Scaler:     s,
-					PreWarm:    true,
-				}
 				preWarm := s.Rule.PreWarmMs
-				go func() {
-					tick := time.NewTimer(time.Duration(preWarm) * time.Millisecond)
-					select {
-					case <-tick.C:
-						d.WaitCheckChan <- createEvent
-						tick.Stop()
+				preWarm -= time.Now().UnixMilli() - s.LastTime
+				if preWarm > 0 {
+					for i := 0; i < s.Rule.PreCreateCnt; i++ {
+						createEvent := &CreateEvent{
+							InstanceId: uuid.NewString(),
+							RequestId:  s.Rule.Cate + uuid.NewString(),
+							Scaler:     s,
+							PreWarm:    true,
+						}
+						go func() {
+							tick := time.NewTimer(time.Duration(preWarm) * time.Millisecond)
+							select {
+							case <-tick.C:
+								d.WaitCheckChan <- createEvent
+								tick.Stop()
+							}
+						}()
 					}
-				}()
+				}
 			}
 		}
 	}
@@ -212,6 +217,7 @@ func (s *BaseScheduler) fundRule() {
 			rule.GcSec = 0
 			rule.Cate = "single"
 			rule.Valid = true
+			rule.PreCreateCnt = 1
 		} else if B.Max-B.Min < B.Min/10 && B.Min > 15000 && A.Max < 2000 {
 			// 固定周期多次执行类型，执行完毕后，立即销毁，发起一个定时实例创建
 			// 延迟时间：B.Min-2S, 存活时间B.Max-B.Min+3S
@@ -223,6 +229,7 @@ func (s *BaseScheduler) fundRule() {
 			rule.GcSec = int(A.Max/1000 + 1)
 			rule.Cate = "multi"
 			rule.Valid = true
+			rule.PreCreateCnt = 1
 		} else {
 			// 1.2 集合B的Min>Gc时间，这一部分的数据是一定会冷启动的，此时我们可以找到一个时间节点提前GC，节约资源
 			if B.Min > 40000 {
@@ -243,7 +250,7 @@ func (s *BaseScheduler) fundRule() {
 		}
 	}
 	//  数据集3 前置条件判断
-	if s.InitMs > 1000000 {
+	if s.InitMs > 1000 {
 		if time.Now().UnixMilli()-s.LastTime > int64(B.Max) {
 			s.Rule = rule
 			return
@@ -256,6 +263,7 @@ func (s *BaseScheduler) fundRule() {
 			rule.GcSec = 0
 			rule.Cate = "single"
 			rule.Valid = true
+			rule.PreCreateCnt = 1
 		} else if B.Max-B.Min < B.Min/10 && B.Min > 20000 && A.Max < 2000 {
 			// 固定周期多次执行类型，实例全部销毁后，发起N个实例创建，N=lastMaxWorking
 			// 延迟时间：B.Min-2S, 存活时间B.Max-B.Min+2S
@@ -264,7 +272,7 @@ func (s *BaseScheduler) fundRule() {
 			if rule.KeepAliveMs > 40000 {
 				rule.KeepAliveMs = 40000
 			}
-			rule.GcSec = int(A.Max/1000 + 1)
+			rule.GcSec = int(A.Max/1000 + 2)
 			rule.Cate = "multi"
 			rule.Valid = true
 			rule.PreCreateCnt = int(s.LastMaxWorking)

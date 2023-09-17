@@ -68,6 +68,7 @@ func (client *PlatformClient) CreateSlot(ctx context.Context, requestId string, 
 			CreateTime:         reply.Slot.CreateTime,
 			CreateDurationInMs: reply.Slot.CreateDurationInMs,
 		},
+		CreateTime: time.Now(),
 	}, nil
 }
 

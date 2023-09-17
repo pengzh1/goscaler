@@ -13,10 +13,15 @@ limitations under the License.
 
 package model
 
-import pb "github.com/AliyunContainerService/scaler/proto"
+import (
+	pb "github.com/AliyunContainerService/scaler/proto"
+	"time"
+)
 
 type Slot struct {
 	pb.Slot
+	GcMs       int64
+	CreateTime time.Time
 }
 
 type SlotResourceConfig struct {

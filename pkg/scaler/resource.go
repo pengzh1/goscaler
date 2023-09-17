@@ -1,12 +1,14 @@
 package scaler
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"github.com/AliyunContainerService/scaler/go/pkg/kmeans"
 	m2 "github.com/AliyunContainerService/scaler/go/pkg/model"
 	platform_client2 "github.com/AliyunContainerService/scaler/go/pkg/platform_client"
 	pb "github.com/AliyunContainerService/scaler/proto"
+	"github.com/rs/zerolog/log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,21 +29,24 @@ type SlotPool struct {
 	ITData     *[200]int32
 	LastExec   *[20]int32
 	CacheChan  chan *m2.Slot
+	IdleSize   atomic.Int32
 	Rule       *Rule
 	AppCnt     int
 	SumInit    int
 	SumExec    int
 	Conf       *m2.SlotResourceConfig
+	idleSlot   *list.List
+	client     *platform_client2.PlatformClient
 }
 
 func NewSlotPool(memInMb uint64, addr string) *SlotPool {
 	pool := &SlotPool{
 		MemInMb:    memInMb,
-		ITLock:     sync.Mutex{},
 		scaler:     sync.Map{},
 		OnWait:     atomic.Int32{},
 		OnCreate:   atomic.Int32{},
 		CreateTime: time.Time{},
+		IdleSize:   atomic.Int32{},
 		ReqCnt:     0,
 		EndCnt:     0,
 		LastTime:   0,
@@ -58,10 +63,17 @@ func NewSlotPool(memInMb uint64, addr string) *SlotPool {
 				MemoryInMegabytes: memInMb,
 			},
 		},
+		idleSlot: list.New(),
 	}
+	client, err := platform_client2.New(addr)
+	if err != nil {
+		log.Fatal().Msg("client init with error" + err.Error())
+	}
+	pool.client = client.(*platform_client2.PlatformClient)
 	m2.Printf("NewSlotPool for mem: %s is created", memInMb)
 	go func() {
 		tick := time.NewTicker(5 * time.Second)
+		tick2 := time.NewTicker(50 * time.Millisecond)
 		for {
 			select {
 			case <-tick.C:
@@ -69,13 +81,15 @@ func NewSlotPool(memInMb uint64, addr string) *SlotPool {
 				if pool.ReqCnt >= 10 || (time.Since(pool.CreateTime) > 2*time.Minute && pool.EndCnt > 2) {
 					pool.fundRule()
 				}
+			case <-tick2.C:
+				pool.check()
 			}
 		}
 	}()
 	return pool
 }
 
-func (s *SlotPool) ReqRecord(bs *BaseScheduler) *m2.Slot {
+func (s *SlotPool) ReqRecord(bs *BaseScheduler) {
 	start := time.Now()
 	s.ITLock.Lock()
 	if _, ok := s.scaler.Load(bs.MetaData.Key); !ok {
@@ -99,7 +113,7 @@ func (s *SlotPool) ReqRecord(bs *BaseScheduler) *m2.Slot {
 	}
 	s.ReqCnt += 1
 	s.ITLock.Unlock()
-	return nil
+	return
 }
 
 func (s *SlotPool) EndRecord(dur int32) {
@@ -110,64 +124,101 @@ func (s *SlotPool) EndRecord(dur int32) {
 	s.ITLock.Unlock()
 }
 
+func (s *SlotPool) getFromIdle(reqId string) *m2.Slot {
+	s.Lock.Lock()
+	if element := s.idleSlot.Front(); element != nil {
+		slot := s.idleSlot.Remove(element).(*m2.Slot)
+		s.Lock.Unlock()
+		return slot
+	}
+	s.Lock.Unlock()
+	return nil
+}
+
+func (s *SlotPool) check() {
+	if s.OnWait.Load() == 0 {
+		s.Lock.Lock()
+		defer s.Lock.Unlock()
+		var retain []*m2.Slot
+		// 2.onWait=0，检查idleChan是否已清空
+	loop:
+		for {
+			select {
+			case ret := <-s.CacheChan:
+				s.IdleSize.Add(-1)
+				m2.ReqLog("", "", "", "fastConsume21", time.Since(ret.CreateTime).Milliseconds())
+				if time.Now().UnixMilli() > ret.GcMs {
+					go func() {
+						_ = s.client.DestroySLot(context.Background(), "", ret.Id, "cacheTimeout3")
+						m2.Printf("cacheSendTimeout3:%d", s.MemInMb)
+					}()
+				} else {
+					retain = append(retain, ret)
+				}
+			default:
+				break loop
+			}
+		}
+		for _, c := range retain {
+			s.IdleSize.Add(1)
+			s.CacheChan <- c
+		}
+	}
+}
+
 func (s *SlotPool) Fetch(ctx context.Context, reqId string, bs *BaseScheduler, client *platform_client2.PlatformClient) *m2.Slot {
 	s.OnWait.Add(1)
 	defer s.OnWait.Add(-1)
-	select {
-	case sl := <-s.CacheChan:
-		return sl
-	default:
-		for s.OnCreate.Load() < s.OnWait.Load() {
+	if s.MemInMb > 1024 {
+		slot, _ := client.CreateSlot(ctx, reqId, s.Conf)
+		return slot
+	}
+	for s.OnCreate.Load()+s.IdleSize.Load() < s.OnWait.Load() {
+		s.OnCreate.Add(1)
+		go func() {
+			slot, err := client.CreateSlot(ctx, reqId, s.Conf)
+			if err != nil {
+				m2.Printf("createFailed:%s", fmt.Sprintf("create slot failed with: %s", err.Error()))
+				s.OnCreate.Add(-1)
+				return
+			}
+			slot.GcMs = time.Now().UnixMilli() + 50
+			m2.Printf("cacheSendSuc:%d", s.MemInMb)
+			s.CacheChan <- slot
+			s.IdleSize.Add(1)
+			s.OnCreate.Add(-1)
+		}()
+	}
+	if s.Rule.Valid {
+		s.Lock.Lock()
+		for s.OnCreate.Load()+s.IdleSize.Load() < s.OnWait.Load()+int32(s.Rule.PreCreateCnt) {
 			s.OnCreate.Add(1)
 			go func() {
-				defer s.OnCreate.Add(-1)
 				slot, err := client.CreateSlot(ctx, reqId, s.Conf)
 				if err != nil {
 					m2.Printf("createFailed:%s", fmt.Sprintf("create slot failed with: %s", err.Error()))
+					s.OnCreate.Add(-1)
 					return
 				}
-				tick := time.NewTimer(50 * time.Millisecond)
-				defer tick.Stop()
-				select {
-				case s.CacheChan <- slot:
-					m2.Printf("cacheSendSuc:%d", s.MemInMb)
-				case <-tick.C:
-					_ = client.DestroySLot(context.Background(), reqId, slot.Id, "cacheTimeout")
-					m2.Printf("cacheSendTimeout:%d", s.MemInMb)
-				}
+				slot.GcMs = time.Now().UnixMilli() + s.Rule.KeepAliveMs
+				m2.Printf("cacheSendSuc2:%d", s.MemInMb)
+				s.CacheChan <- slot
+				s.IdleSize.Add(1)
+				s.OnCreate.Add(-1)
 			}()
 		}
-		if s.Rule.Valid {
-			for s.OnCreate.Load() < s.OnWait.Load()+int32(s.Rule.PreCreateCnt) {
-				s.OnCreate.Add(1)
-				go func() {
-					defer s.OnCreate.Add(-1)
-					slot, err := client.CreateSlot(ctx, reqId, s.Conf)
-					if err != nil {
-						m2.Printf("createFailed:%s", fmt.Sprintf("create slot failed with: %s", err.Error()))
-						return
-					}
-					tick := time.NewTimer(time.Duration(s.Rule.KeepAliveMs) * time.Millisecond)
-					defer tick.Stop()
-					select {
-					case s.CacheChan <- slot:
-						m2.Printf("cacheSendSuc2:%d", s.MemInMb)
-					case <-tick.C:
-						_ = client.DestroySLot(context.Background(), reqId, slot.Id, "cacheTimeout")
-						m2.Printf("cacheSendTimeout2:%d", s.MemInMb)
-					}
-				}()
-			}
-		}
-		sl := <-s.CacheChan
-		return sl
+		s.Lock.Unlock()
 	}
+	sl := <-s.CacheChan
+	s.IdleSize.Add(-1)
+	return sl
 }
 
 func (s *SlotPool) Return(slot *m2.Slot, reqId string, bs *BaseScheduler, client *platform_client2.PlatformClient) {
 	tick := time.NewTimer(40 * time.Millisecond)
 	select {
 	case s.CacheChan <- slot:
+		s.IdleSize.Add(1)
 		m2.Printf("returnSendSuc2:%d", s.MemInMb)
 	case <-tick.C:
 		_ = client.DestroySLot(context.Background(), reqId, slot.Id, "cacheTimeout2")
