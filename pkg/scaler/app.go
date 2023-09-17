@@ -31,36 +31,39 @@ import (
 )
 
 type BaseScheduler struct {
-	config       *config.Config
-	MetaData     *m2.Meta
-	Lock         sync.Mutex
-	CheckLock    sync.Mutex
-	IdleLock     sync.Mutex
-	instances    sync.Map
-	idleInstance *list.List
-	OnWait       atomic.Int32
-	OnCreate     atomic.Int32
-	IdleSize     atomic.Int32
-	InstanceSize atomic.Int32
-	IdleChan     chan *m2.CreateRet
-	CheckChan    sync.Map // key timestamp int64 value chan struct{}
-	LastGc       time.Time
-	LastKm       time.Time
-	CreateTime   time.Time
-	GcTime       uint64
-	GcCnt        int
-	ReqCnt       int
-	EndCnt       int
-	ITLock       sync.Mutex
-	LastTime     int64
-	ITTime       *[200]int64
-	ITData       *[200]int32
-	LastExec     *[20]int32
-	InitMs       int32
-	AvgExec      int32
-	Rule         *Rule
-	d            *Dispatcher
-	pool         *SlotPool
+	config         *config.Config
+	MetaData       *m2.Meta
+	Lock           sync.Mutex
+	CheckLock      sync.Mutex
+	IdleLock       sync.Mutex
+	instances      sync.Map
+	idleInstance   *list.List
+	OnWait         atomic.Int32
+	OnCreate       atomic.Int32
+	IdleSize       atomic.Int32
+	InstanceSize   atomic.Int32
+	IdleChan       chan *m2.CreateRet
+	CheckChan      sync.Map // key timestamp int64 value chan struct{}
+	LastGc         time.Time
+	LastKm         time.Time
+	CreateTime     time.Time
+	GcTime         uint64
+	GcCnt          int
+	ReqCnt         int
+	EndCnt         int
+	ITLock         sync.Mutex
+	LastTime       int64
+	ITTime         *[200]int64
+	ITData         *[200]int32
+	LastExec       *[20]int32
+	InitMs         int32
+	AvgExec        int32
+	Rule           *Rule
+	d              *Dispatcher
+	LastMaxWorking int32
+	CurMaxWorking  int32
+	CurWorking     atomic.Int32
+	pool           *SlotPool
 }
 
 func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *BaseScheduler {
@@ -91,6 +94,13 @@ func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *
 }
 
 func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.AssignReply, error) {
+	cur := s.CurWorking.Add(1)
+	if cur > s.CurMaxWorking {
+		s.CurMaxWorking = cur
+		if s.CurMaxWorking > s.LastMaxWorking {
+			s.LastMaxWorking = s.CurMaxWorking
+		}
+	}
 	start := time.Now()
 	s.ITLock.Lock()
 	if s.LastTime == 0 {
@@ -134,6 +144,10 @@ func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (
 func (s *BaseScheduler) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleReply, error) {
 	if request.Assigment == nil {
 		return nil, status.Errorf(codes.InvalidArgument, fmt.Sprintf("assignment is nil"))
+	}
+	cur := s.CurWorking.Add(-1)
+	if cur == 0 {
+		s.LastMaxWorking = s.CurMaxWorking
 	}
 	start := time.Now()
 	instanceId := request.Assigment.InstanceId

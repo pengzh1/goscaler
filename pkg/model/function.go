@@ -36,6 +36,7 @@ type Instance struct {
 	Meta             *Meta
 	CreateTimeInMs   int64
 	KeepAliveMs      int64
+	GcMs             int64
 	InitDurationInMs int64
 	Busy             bool
 	//CreateTime       time.Time

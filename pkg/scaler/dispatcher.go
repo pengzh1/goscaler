@@ -189,23 +189,25 @@ func (d *Dispatcher) Idle(instanceId, requestId, meta, reason string, needDelete
 		if s.Rule.Valid {
 			// preWarm>0 直接删除实例，经过preWarm ms后自动创建，保活keepAlive ms后自动删除，自动删除时更新策略无效
 			if s.Rule.PreWarmMs > 0 && s.Rule.KeepAliveMs > 0 {
-				d.transferDelete(uuid.NewString(), instance.Slot.Id, instanceId, meta, "ruleFastDelete")
-				createEvent := &CreateEvent{
-					InstanceId: uuid.NewString(),
-					RequestId:  s.Rule.Cate + uuid.NewString(),
-					Scaler:     s,
-					PreWarm:    true,
-				}
-				preWarm := s.Rule.PreWarmMs
-				go func() {
-					tick := time.NewTimer(time.Duration(preWarm) * time.Millisecond)
-					select {
-					case <-tick.C:
-						d.WaitCheckChan <- createEvent
-						tick.Stop()
+				if s.Rule.GcSec == 0 {
+					d.transferDelete(uuid.NewString(), instance.Slot.Id, instanceId, meta, "ruleFastDelete")
+					createEvent := &CreateEvent{
+						InstanceId: uuid.NewString(),
+						RequestId:  s.Rule.Cate + uuid.NewString(),
+						Scaler:     s,
+						PreWarm:    true,
 					}
-				}()
-				return nil
+					preWarm := s.Rule.PreWarmMs
+					go func() {
+						tick := time.NewTimer(time.Duration(preWarm) * time.Millisecond)
+						select {
+						case <-tick.C:
+							d.WaitCheckChan <- createEvent
+							tick.Stop()
+						}
+					}()
+					return nil
+				}
 			}
 		}
 		if s.OnWait.Load() > 0 {

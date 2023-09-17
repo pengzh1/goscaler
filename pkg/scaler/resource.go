@@ -165,7 +165,7 @@ func (s *SlotPool) Fetch(ctx context.Context, reqId string, bs *BaseScheduler, c
 }
 
 func (s *SlotPool) Return(slot *m2.Slot, reqId string, bs *BaseScheduler, client *platform_client2.PlatformClient) {
-	tick := time.NewTimer(50 * time.Millisecond)
+	tick := time.NewTimer(40 * time.Millisecond)
 	select {
 	case s.CacheChan <- slot:
 		m2.Printf("returnSendSuc2:%d", s.MemInMb)
@@ -208,14 +208,17 @@ func (s *SlotPool) fundRule() {
 			return
 		}
 		// 周期性burst流量，有请求到来时，可用Slot数+创建中数=等待数+2
-		if A.Max < 200 && B.Min > 10000 {
+		if A.Max < 1000 || (A.Max < 3000 && A.Center < 1000) && B.Min > 10000 {
 			rule.Valid = true
 			rule.PreCreateCnt = 2
+			if 100/A.Max > 3 {
+				rule.PreCreateCnt = int(100/A.Max) - 1
+			}
 			rule.KeepAliveMs = int64(A.Max + 200)
 		}
 	}
 	if rule.Valid == true {
-		m2.Printf("getSlotRule:Cate:%s,Gc:%d,%d", rule.Cate, rule.GcSec, s.MemInMb)
+		m2.Printf("getSlotRule:Cate:%s,%d,%d,%d", rule.Cate, rule.PreCreateCnt, rule.KeepAliveMs, s.MemInMb)
 	}
 	s.Rule = rule
 }

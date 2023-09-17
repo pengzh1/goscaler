@@ -20,7 +20,7 @@ func (s *BaseScheduler) GetIdleDurationBeforeGC(inst *model.Instance) time.Durat
 	if inst.KeepAliveMs > 0 && inst.LastStart.Sub(inst.LastIdleTime).Milliseconds() == 0 {
 		return time.Duration(inst.KeepAliveMs) * time.Millisecond
 	}
-	if s.Rule.Valid {
+	if s.Rule.Valid && s.Rule.GcSec > 0 {
 		return time.Duration(s.Rule.GcSec) * time.Second
 	}
 	return s.config.IdleDurationBeforeGC
