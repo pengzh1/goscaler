@@ -24,17 +24,22 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"runtime"
+	"runtime/debug"
 )
 
 func main() {
-	//debug.SetGCPercent(200)
+	run()
+}
+func run() {
+	debug.SetGCPercent(150)
 	zerolog.TimeFieldFormat = "15:04:05.000000"
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	lis, err := net.Listen("tcp", ":9001")
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-	s := grpc.NewServer(grpc.MaxConcurrentStreams(1000),
+	s := grpc.NewServer(
+		grpc.MaxConcurrentStreams(1000),
 		grpc.InitialWindowSize(1024*1024),
 		grpc.InitialConnWindowSize(16*1024*1024),
 		//grpc.ReadBufferSize(1024*512),
@@ -44,13 +49,14 @@ func main() {
 	pb.RegisterScalerServer(s, scaleServer)
 	log.Printf("server listening at %v", lis.Addr())
 
+	if os.Getenv("dev") != "true" {
+		runtime.SetCPUProfileRate(0)
+		runtime.SetBlockProfileRate(0)
+		runtime.SetMutexProfileFraction(0)
+	}
 	go func() {
 		if os.Getenv("dev") == "true" {
 			log.Println(http.ListenAndServe("localhost:6060", nil))
-		} else {
-			runtime.SetCPUProfileRate(0)
-			runtime.SetBlockProfileRate(0)
-			runtime.SetMutexProfileFraction(0)
 		}
 	}()
 

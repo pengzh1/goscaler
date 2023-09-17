@@ -21,7 +21,7 @@ docker-build: proto
 #	manifest/make-rules/manifest.sh /edge-proxy:  
 	docker buildx build --push --platform linux/amd64 \
     --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64  \
-    -f Dockerfile . -t registry.cn-hangzhou.aliyuncs.com/beeper/scaler:
+    -f Dockerfile . -t registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v832
 
 
 proto:

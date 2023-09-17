@@ -44,6 +44,20 @@ type BaseScheduler struct {
 	IdleChan     chan *m2.CreateRet
 	CheckChan    sync.Map // key timestamp int64 value chan struct{}
 	LastGc       time.Time
+	LastKm       time.Time
+	CreateTime   time.Time
+	GcTime       uint64
+	GcCnt        int
+	ReqCnt       int
+	EndCnt       int
+	ITLock       sync.Mutex
+	LastTime     int64
+	ITTime       *[200]int64
+	ITData       *[200]int32
+	LastExec     *[20]int32
+	InitMs       int32
+	AvgExec      int32
+	Rule         *Rule
 	d            *Dispatcher
 }
 
@@ -51,7 +65,6 @@ func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *
 	scheduler := &BaseScheduler{
 		config:       config,
 		MetaData:     metaData,
-		Lock:         sync.Mutex{},
 		instances:    sync.Map{},
 		idleInstance: list.New(),
 		OnWait:       atomic.Int32{},
@@ -61,7 +74,15 @@ func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *
 		IdleChan:     make(chan *m2.CreateRet, 1024),
 		CheckChan:    sync.Map{},
 		LastGc:       time.Now(),
-		d:            d,
+		LastKm:       time.Now(),
+		CreateTime:   time.Now(),
+		ITData:       new([200]int32),
+		ITTime:       new([200]int64),
+		LastExec:     new([20]int32),
+		Rule: &Rule{
+			Cate: 0,
+		},
+		d: d,
 	}
 	m2.Printf("NewBaseScheduler scaler for app: %s is created", metaData.Key)
 	return scheduler
@@ -69,6 +90,22 @@ func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *
 
 func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.AssignReply, error) {
 	start := time.Now()
+	s.ITLock.Lock()
+	s.ReqCnt += 1
+	if s.LastTime == 0 {
+		s.LastTime = start.UnixMilli()
+	} else {
+		it := int32(start.UnixMilli() - s.LastTime)
+		s.ITTime[s.ReqCnt%len(s.ITTime)] = start.UnixMilli()
+		s.ITData[s.ReqCnt%len(s.ITTime)] = it
+		if s.Rule.Valid {
+			if it > s.Rule.Cluster[1].Max || it < s.Rule.Cluster[0].Min || (it < s.Rule.Cluster[1].Min && it < s.Rule.Cluster[0].Max) {
+				s.Rule.Valid = false
+			}
+		}
+		s.LastTime = start.UnixMilli()
+	}
+	s.ITLock.Unlock()
 	instanceId := uuid.New().String()
 	if m2.Dev {
 		defer func() {
@@ -77,6 +114,7 @@ func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (
 		m2.ReqLog(request.RequestId, s.MetaData.Key, "", "AssignStart", -1)
 	}
 	instance := s.d.Fetch(instanceId, request.RequestId, s.MetaData)
+	s.InitMs = int32(instance.InitDurationInMs)
 	return &pb.AssignReply{
 		Status: pb.Status_Ok,
 		Assigment: &pb.Assignment{
@@ -104,6 +142,20 @@ func (s *BaseScheduler) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.
 	if request.Result != nil && request.Result.NeedDestroy != nil && *request.Result.NeedDestroy {
 		needDestroy = true
 	}
+	s.ITLock.Lock()
+	s.EndCnt += 1
+	s.LastExec[s.EndCnt%len(s.LastExec)] = int32(request.Result.DurationInMs)
+	if s.EndCnt%5 == 0 {
+		sum, cnt := int32(0), 0
+		for _, c := range s.LastExec {
+			if c > 0 {
+				sum += c
+				cnt += 1
+			}
+		}
+		s.AvgExec = sum / int32(cnt)
+	}
+	s.ITLock.Unlock()
 	_ = s.d.Idle(instanceId, uuid.NewString(), s.MetaData.Key, "idle", needDestroy)
 	return &pb.IdleReply{
 		Status:       pb.Status_Ok,

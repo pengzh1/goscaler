@@ -1,5 +1,5 @@
-export VERSION=v823
-export DATA=dataSet_3
+export VERSION=v841
+export DATA=ds1a
 export NAME=sim9
 docker buildx build --push --platform linux/amd64 \
     --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64  \
