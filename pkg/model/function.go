@@ -35,6 +35,7 @@ type Instance struct {
 	Slot             *Slot
 	Meta             *Meta
 	CreateTimeInMs   int64
+	KeepAliveMs      int64
 	InitDurationInMs int64
 	Busy             bool
 	//CreateTime       time.Time

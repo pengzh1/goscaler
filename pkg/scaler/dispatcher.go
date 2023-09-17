@@ -47,6 +47,7 @@ type CreateEvent struct {
 	InstanceId string
 	RequestId  string
 	Scaler     *BaseScheduler
+	PreWarm    bool
 }
 type IdleInstance struct {
 	Instance *m2.Instance
@@ -69,7 +70,11 @@ func (d *Dispatcher) runCreateHandler(ctx context.Context, ClientAddr string, id
 		select {
 		case checkEvent := <-d.WaitCheckChan:
 			start := time.Now()
-			d.checkWait(checkEvent.Scaler, checkEvent.RequestId, checkEvent.InstanceId, client.(*platform_client2.PlatformClient))
+			if checkEvent.PreWarm {
+				d.preWarm(checkEvent.Scaler, checkEvent.RequestId, checkEvent.InstanceId, client.(*platform_client2.PlatformClient), checkEvent)
+			} else {
+				d.checkWait(checkEvent.Scaler, checkEvent.RequestId, checkEvent.InstanceId, client.(*platform_client2.PlatformClient))
+			}
 			m2.Printf("worker%d check runEnd %dus", id, time.Since(start).Microseconds())
 		case <-ctx.Done():
 			return
@@ -179,6 +184,28 @@ func (d *Dispatcher) Idle(instanceId, requestId, meta, reason string, needDelete
 			Instance: instance,
 		}
 		// onWait大于0时，直接推送IdleChan，否则保存到idleInstances链表
+		if s.Rule.Valid {
+			// preWarm>0 直接删除实例，经过preWarm ms后自动创建，保活keepAlive ms后自动删除，自动删除时更新策略无效
+			if s.Rule.PreWarmMs > 0 && s.Rule.KeepAliveMs > 0 {
+				d.transferDelete(uuid.NewString(), instance.Slot.Id, instanceId, meta, "ruleFastDelete")
+				createEvent := &CreateEvent{
+					InstanceId: uuid.NewString(),
+					RequestId:  s.Rule.Cate + uuid.NewString(),
+					Scaler:     s,
+					PreWarm:    true,
+				}
+				preWarm := s.Rule.PreWarmMs
+				go func() {
+					tick := time.NewTimer(time.Duration(preWarm) * time.Millisecond)
+					select {
+					case <-tick.C:
+						d.WaitCheckChan <- createEvent
+						tick.Stop()
+					}
+				}()
+				return nil
+			}
+		}
 		if s.OnWait.Load() > 0 {
 			m2.Printf("pushIdleChan")
 			s.IdleChan <- idleInstance
@@ -260,6 +287,14 @@ func (d *Dispatcher) checkWait(s *BaseScheduler, reqId, instId string, client *p
 		s.CheckChan.Delete(idx)
 		close(cc)
 		s.CheckLock.Unlock()
+	}()
+}
+
+func (d *Dispatcher) preWarm(s *BaseScheduler, reqId, instId string, client *platform_client2.PlatformClient, event *CreateEvent) {
+	s.OnCreate.Add(1)
+	go func() {
+		d.CreateNewPreWarm(context.Background(), instId, reqId, s, client, event)
+		s.OnCreate.Add(-1)
 	}()
 }
 
@@ -382,6 +417,66 @@ func (d *Dispatcher) CreateNew(ctx context.Context, instanceId, requestId string
 			}
 		}
 	}
+}
+
+func (d *Dispatcher) CreateNewPreWarm(ctx context.Context, instanceId, requestId string,
+	s *BaseScheduler, client *platform_client2.PlatformClient, event *CreateEvent) {
+	if !s.Rule.Valid {
+		return
+	}
+	m2.Printf("AssignNew,%s,%s", requestId, s.MetaData.Key)
+	resourceConfig := m2.SlotResourceConfig{
+		ResourceConfig: pb.ResourceConfig{
+			MemoryInMegabytes: s.MetaData.MemoryInMb,
+		},
+	}
+	var slot *m2.Slot
+	var err error
+	// 1. 创建Slot 100ms左右 TODO 低内存共享Slot,预创建Slot
+	slot, err = d.createSlot(ctx, requestId, &resourceConfig, client)
+	if err != nil {
+		m2.Printf("createFailed:%s", fmt.Sprintf("create slot failed with: %s", err.Error()))
+		return
+	}
+	if !s.Rule.Valid {
+		d.transferDelete(uuid.NewString(), slot.Id, instanceId, s.MetaData.Key, "fastDelete")
+		return
+	}
+	m2.Printf("AssignInit,%s,%s", requestId, s.MetaData.Key)
+	rMeta := &m2.Meta{
+		Meta: pb.Meta{
+			Key:           s.MetaData.Key,
+			Runtime:       s.MetaData.Runtime,
+			TimeoutInSecs: s.MetaData.TimeoutInSecs,
+		},
+	}
+	// 3. 执行初始化
+	result := &m2.CreateRet{}
+	instance, err := client.Init(context.Background(), requestId, instanceId, slot, rMeta)
+	if err != nil {
+		errorMessage := fmt.Sprintf("create instance failed with: %s", err.Error())
+		m2.Printf(errorMessage)
+		return
+	}
+	if !s.Rule.Valid {
+		d.transferDelete(uuid.NewString(), slot.Id, instanceId, s.MetaData.Key, "fastDelete")
+		return
+	}
+	instance.KeepAliveMs = s.Rule.KeepAliveMs
+	result.Instance = instance
+	s.instances.Store(instance.Id, instance)
+	s.InstanceSize.Add(1)
+	if s.OnWait.Load() > 0 {
+		m2.Printf("pushIdleChan2")
+		s.IdleChan <- result
+		s.IdleSize.Add(1)
+	} else {
+		s.Lock.Lock()
+		m2.Printf("pushFront2")
+		s.idleInstance.PushFront(instance)
+		s.Lock.Unlock()
+	}
+	return
 }
 
 func (d *Dispatcher) getFromIdle(s *BaseScheduler, reqId string) *m2.Instance {

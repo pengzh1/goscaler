@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/AliyunContainerService/scaler/go/pkg/config"
+	"github.com/AliyunContainerService/scaler/go/pkg/kmeans"
 	m2 "github.com/AliyunContainerService/scaler/go/pkg/model"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -80,7 +81,7 @@ func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *
 		ITTime:       new([200]int64),
 		LastExec:     new([20]int32),
 		Rule: &Rule{
-			Cate: 0,
+			Cate: "",
 		},
 		d: d,
 	}
@@ -91,20 +92,22 @@ func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *
 func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.AssignReply, error) {
 	start := time.Now()
 	s.ITLock.Lock()
-	s.ReqCnt += 1
 	if s.LastTime == 0 {
 		s.LastTime = start.UnixMilli()
 	} else {
 		it := int32(start.UnixMilli() - s.LastTime)
-		s.ITTime[s.ReqCnt%len(s.ITTime)] = start.UnixMilli()
-		s.ITData[s.ReqCnt%len(s.ITTime)] = it
+		s.ITTime[(s.ReqCnt-1)%len(s.ITTime)] = start.UnixMilli()
+		s.ITData[(s.ReqCnt-1)%len(s.ITTime)] = it
 		if s.Rule.Valid {
-			if it > s.Rule.Cluster[1].Max || it < s.Rule.Cluster[0].Min || (it < s.Rule.Cluster[1].Min && it < s.Rule.Cluster[0].Max) {
+			// IT逃逸后设置规则无效
+			if kmeans.Escape(it, s.Rule.Cluster[0]) && kmeans.Escape(it, s.Rule.Cluster[1]) {
 				s.Rule.Valid = false
+				m2.Printf("ruleInvalid:%s,%d", s.MetaData.Key, it)
 			}
 		}
 		s.LastTime = start.UnixMilli()
 	}
+	s.ReqCnt += 1
 	s.ITLock.Unlock()
 	instanceId := uuid.New().String()
 	if m2.Dev {
@@ -144,7 +147,7 @@ func (s *BaseScheduler) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.
 	}
 	s.ITLock.Lock()
 	s.EndCnt += 1
-	s.LastExec[s.EndCnt%len(s.LastExec)] = int32(request.Result.DurationInMs)
+	s.LastExec[(s.EndCnt-1)%len(s.LastExec)] = int32(request.Result.DurationInMs)
 	if s.EndCnt%5 == 0 {
 		sum, cnt := int32(0), 0
 		for _, c := range s.LastExec {

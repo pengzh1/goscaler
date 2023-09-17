@@ -70,24 +70,26 @@ func (d *Dispatcher) runGc(s *BaseScheduler) {
 				arr = append(arr, key.(int64))
 				return true
 			})
-			sort.Slice(arr, func(i, j int) bool {
-				return arr[i] < arr[j]
-			})
-			size := s.OnWait.Load()
-			if size < int32(len(arr)) {
-				dropIdx := arr[size]
-				s.CheckChan.Range(func(key, value any) bool {
-					m2.Printf("sendCheck")
-					if key.(int64) >= dropIdx {
-						select {
-						case value.(chan struct{}) <- struct{}{}:
-							m2.Printf("sendCheckSuc")
-						default:
-							m2.Printf("sendCheckDrop")
-						}
-					}
-					return true
+			if len(arr) > 0 {
+				sort.Slice(arr, func(i, j int) bool {
+					return arr[i] < arr[j]
 				})
+				size := s.OnWait.Load()
+				if size < int32(len(arr)) {
+					dropIdx := arr[size]
+					s.CheckChan.Range(func(key, value any) bool {
+						m2.Printf("sendCheck")
+						if key.(int64) >= dropIdx {
+							select {
+							case value.(chan struct{}) <- struct{}{}:
+								m2.Printf("sendCheckSuc")
+							default:
+								m2.Printf("sendCheckDrop")
+							}
+						}
+						return true
+					})
+				}
 			}
 		}
 		s.CheckLock.Unlock()
@@ -100,7 +102,7 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 	if time.Since(s.LastKm) > 10*time.Second {
 		s.LastKm = time.Now()
 		// 准入条件，请求记录大于200，或创建时间大于5分钟且请求数大于1
-		if s.ReqCnt >= 10 || (time.Since(s.CreateTime) > 2*time.Minute && s.ReqCnt > 2) {
+		if s.ReqCnt >= 10 || (time.Since(s.CreateTime) > 2*time.Minute && s.ReqCnt > 1) {
 			s.fundRule()
 		}
 	}
@@ -114,9 +116,13 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 			element := cur
 			instance := element.Value.(*m2.Instance)
 			idleDuration := time.Now().Sub(instance.LastIdleTime)
-			if idleDuration > s.GetIdleDurationBeforeGC() {
+			if idleDuration > s.GetIdleDurationBeforeGC(instance) {
+				if instance.KeepAliveMs > 0 && instance.LastStart.Sub(instance.LastIdleTime).Milliseconds() == 0 {
+					m2.Printf("ruleInvalid:%s", s.MetaData.Key)
+					s.Rule.Valid = false
+				}
 				m2.Printf("Idle duration: %dms, time excceed configured: %dms", idleDuration.Milliseconds(),
-					s.GetIdleDurationBeforeGC().Milliseconds())
+					s.GetIdleDurationBeforeGC(instance).Milliseconds())
 				s.idleInstance.Remove(element)
 				m2.ReqLog("", s.MetaData.Key, "", "fastConsume10", idleDuration.Milliseconds())
 				d.transferDelete(uuid.NewString(), instance.Slot.Id, instance.Id, instance.Meta.Key, "gc")
@@ -141,9 +147,9 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 type Rule struct {
 	// 1 周期型，每隔周期T1，在较短时间T2内发出N个请求，T2<<T1，T1>2*ColdStart
 	// 2 均衡型，以某一水平持续发出请求,平均间隔周期<ColdStart
-	Cate        int
+	Cate        string
 	Cluster     *[2]*kmeans.Cluster
-	PreWarmMs   int
+	PreWarmMs   int64
 	KeepAliveMs int64
 	MaxMs       int
 	GcSec       int
@@ -154,14 +160,14 @@ func (s *BaseScheduler) fundRule() {
 	// 对目前的请求到达间隔进行二分类
 	data := s.ITData[:]
 	if s.ReqCnt < 200 {
-		data = data[:s.ReqCnt]
+		data = data[:s.ReqCnt-1]
 	}
 	cs := kmeans.PartitionV1(data)
-	m2.Printf("partResult:%v,%v", cs[0], cs[1])
+	m2.Printf("partResult:%s,%v,%v,%v", s.MetaData.Key, cs[0], cs[1], data)
 	A := cs[0]
 	B := cs[1]
 	rule := &Rule{
-		Cate:        0,
+		Cate:        "",
 		Cluster:     cs,
 		PreWarmMs:   0,
 		KeepAliveMs: 0,
@@ -173,6 +179,10 @@ func (s *BaseScheduler) fundRule() {
 	//  此类应用初始化时间极少，核心目标是找到一个可以放心GC的时间间隔，不需要过多考虑预创建
 	//  数据集1，2 前置条件判断
 	if s.InitMs < 80 && s.AvgExec < 80 {
+		if time.Now().UnixMilli()-s.LastTime > int64(B.Max) {
+			s.Rule = rule
+			return
+		}
 		// 1.2 集合B的Min>Gc时间，这一部分的数据是一定会冷启动的，此时我们需要找到一个时间节点提前GC，节约资源
 		if B.Min > 40000 {
 			// 集合A的Max<15秒，然后我们将GC时间调整为MaxA+5秒
@@ -184,14 +194,24 @@ func (s *BaseScheduler) fundRule() {
 				// 集合A的Min也大于40秒，说明是长周期单次执行类型，我们将GC策略调整为立即删除
 				rule.GcSec = 0
 			}
-		} else if A.Max < 2000 && B.Min > 20000 && len(B.Points) > 4*len(A.Points) {
+		}
+		//
+		//else if A.Max < 2000 && B.Min > 20000 && len(A.Points) > 4*len(B.Points) {
+		//	rule.Valid = true
+		//	// 集合BMin>20秒，但此时集合A的数量比较大，且间隔很短，此时提前GC也是有收益的
+		//	rule.GcSec = int(A.Max)/1000 + 5
+		//}
+		if A.Min > 10000 && B.Max-A.Min < A.Min/5 {
+			// 固定周期单次执行类型，执行完毕后，立即销毁，发起一个定时实例创建
+			// 延迟时间：A.Min-2S, 存活时间A.MAX-A.Min+2S
+			rule.PreWarmMs = int64(A.Min - 2000)
+			rule.KeepAliveMs = int64(B.Max - A.Min + 2000)
+			rule.Cate = "single"
 			rule.Valid = true
-			// 集合BMin>20秒，但此时集合A的数量比较大，且间隔很短，此时提前GC也是有收益的
-			rule.GcSec = int(A.Max)/1000 + 5
 		}
 	}
 	if rule.Valid == true {
-		m2.Printf("getRule:Cate:%d,Gc:%d,%s", rule.Cate, rule.GcSec, s.MetaData.Key)
+		m2.Printf("getRule:Cate:%s,Gc:%d,%s", rule.Cate, rule.GcSec, s.MetaData.Key)
 	}
 	s.Rule = rule
 }

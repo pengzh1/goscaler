@@ -1,6 +1,7 @@
 package scaler
 
 import (
+	"github.com/AliyunContainerService/scaler/go/pkg/model"
 	"time"
 )
 
@@ -15,7 +16,10 @@ func (s *BaseScheduler) GetGcInterval() time.Duration {
 	return 2 * time.Second
 }
 
-func (s *BaseScheduler) GetIdleDurationBeforeGC() time.Duration {
+func (s *BaseScheduler) GetIdleDurationBeforeGC(inst *model.Instance) time.Duration {
+	if inst.KeepAliveMs > 0 && inst.LastStart.Sub(inst.LastIdleTime).Milliseconds() == 0 {
+		return time.Duration(inst.KeepAliveMs) * time.Millisecond
+	}
 	if s.Rule.Valid {
 		return time.Duration(s.Rule.GcSec) * time.Second
 	}

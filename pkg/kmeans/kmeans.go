@@ -1,7 +1,6 @@
 package kmeans
 
 import (
-	m2 "github.com/AliyunContainerService/scaler/go/pkg/model"
 	"math/rand"
 	"time"
 )
@@ -42,7 +41,7 @@ func Nearest(cls *[2]*Cluster, point int32) int {
 
 func PartitionV1(data []int32) *[2]*Cluster {
 	cc := PartitionTwo(data)
-	for cc[0].Max > cc[0].Min*10 && cc[0].Max > 40000 {
+	for cc[0].Max > cc[0].Min*20 && cc[0].Max > 20000 {
 		cc2 := PartitionTwo(cc[0].Points)
 		cc[0] = cc2[0]
 		cc[1] = Merge(cc2[1], cc[1])
@@ -105,7 +104,7 @@ func PartitionTwo(dataset []int32) *[2]*Cluster {
 		}
 		if i == IterationThreshold ||
 			changes < int(float64(len(dataset))*deltaThreshold) {
-			m2.Printf("Aborting:itr:%d,chg:%d,thr:%d", i, changes, int(float64(len(dataset))*deltaThreshold))
+			//m2.Printf("Aborting:itr:%d,chg:%d,thr:%d", i, changes, int(float64(len(dataset))*deltaThreshold))
 			break
 		}
 	}
@@ -136,4 +135,20 @@ func Recenter(c *Cluster) {
 	c.Center = sum / int32(len(c.Points))
 	c.Max = maxNum
 	c.Min = minNum
+}
+
+func Escape(p int32, c *Cluster) bool {
+	if p >= c.Min && p <= c.Max {
+		return false
+	}
+	if p > c.Max {
+		if p-c.Max > c.Center/10 || p-c.Max > 1800 {
+			return true
+		}
+	} else {
+		if c.Min-p > c.Center/10 || c.Min-p > 1800 {
+			return true
+		}
+	}
+	return false
 }
