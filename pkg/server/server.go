@@ -20,6 +20,7 @@ import (
 	"github.com/AliyunContainerService/scaler/go/pkg/model"
 	"github.com/AliyunContainerService/scaler/go/pkg/scaler"
 	pb "github.com/AliyunContainerService/scaler/proto"
+	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -52,17 +53,24 @@ func (s *Server) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 }
 
 func (s *Server) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleReply, error) {
-	if request.Assigment == nil {
-		return nil, status.Errorf(codes.InvalidArgument, fmt.Sprintf("assignment is nil"))
-	}
-	key := request.Assigment.MetaKey
-	scheduler, ok := s.mgr.Get(key)
-	if !ok {
-		errorMessage := fmt.Sprintf("scaler for app: %s not found", key)
-		return &pb.IdleReply{
-			Status:       pb.Status_InternalError,
-			ErrorMessage: &errorMessage,
-		}, nil
-	}
-	return scheduler.Idle(ctx, request)
+	go func() {
+		if request.Assigment == nil {
+			log.Printf("assignment is nil")
+			return
+		}
+		key := request.Assigment.MetaKey
+		scheduler, ok := s.mgr.Get(key)
+		if !ok {
+			log.Printf("scaler for app: %s not found", key)
+			return
+		}
+		_, err := scheduler.Idle(ctx, request)
+		if err != nil {
+			log.Printf("assignment failed")
+		}
+	}()
+	return &pb.IdleReply{
+		Status:       pb.Status_Ok,
+		ErrorMessage: nil,
+	}, nil
 }

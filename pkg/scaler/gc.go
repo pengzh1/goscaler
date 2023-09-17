@@ -147,13 +147,14 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 type Rule struct {
 	// 1 周期型，每隔周期T1，在较短时间T2内发出N个请求，T2<<T1，T1>2*ColdStart
 	// 2 均衡型，以某一水平持续发出请求,平均间隔周期<ColdStart
-	Cate        string
-	Cluster     *[2]*kmeans.Cluster
-	PreWarmMs   int64
-	KeepAliveMs int64
-	MaxMs       int
-	GcSec       int
-	Valid       bool
+	Cate         string
+	Cluster      *[2]*kmeans.Cluster
+	PreWarmMs    int64
+	KeepAliveMs  int64
+	MaxMs        int
+	GcSec        int
+	Valid        bool
+	PreCreateCnt int
 }
 
 func (s *BaseScheduler) fundRule() {

@@ -18,6 +18,7 @@ type Dispatcher struct {
 	WaitCheckChan chan *CreateEvent
 	DeleteChan    chan *DeleteEvent
 	ScalerMap     sync.Map
+	PoolMap       map[uint64]*SlotPool
 	Deleted       sync.Map
 	ScalerSize    atomic.Int32
 	rw            sync.RWMutex
@@ -30,6 +31,7 @@ func RunDispatcher(ctx context.Context, config *config.Config) *Dispatcher {
 		DeleteChan:    make(chan *DeleteEvent, 1024),
 		ScalerSize:    atomic.Int32{},
 		ScalerMap:     sync.Map{},
+		PoolMap:       make(map[uint64]*SlotPool),
 		Deleted:       sync.Map{},
 		config:        config,
 	}
@@ -233,6 +235,13 @@ func (d *Dispatcher) GetOrCreate(metaData *m2.Meta) Scaler {
 	scheduler := NewBaseScheduler(metaData, d.config, d)
 	d.ScalerMap.Store(metaData.Key, scheduler)
 	d.ScalerSize.Add(1)
+	if p, ok := d.PoolMap[metaData.MemoryInMb]; ok {
+		scheduler.pool = p
+	} else {
+		x := NewSlotPool(metaData.MemoryInMb, d.config.ClientAddr)
+		d.PoolMap[metaData.MemoryInMb] = x
+		scheduler.pool = x
+	}
 	d.rw.Unlock()
 	return scheduler
 }
@@ -335,31 +344,19 @@ func (d *Dispatcher) deleteSlot(reqId, slotId, instanceId, metaKey, reason strin
 func (d *Dispatcher) CreateNew(ctx context.Context, instanceId, requestId string,
 	s *BaseScheduler, client *platform_client2.PlatformClient, check chan struct{}, id int64) {
 	m2.Printf("AssignNew,%s,%s", requestId, s.MetaData.Key)
-	resourceConfig := m2.SlotResourceConfig{
-		ResourceConfig: pb.ResourceConfig{
-			MemoryInMegabytes: s.MetaData.MemoryInMb,
-		},
-	}
 	start := time.Now()
 	var slot *m2.Slot
-	var err error
 	// 1. 创建Slot 100ms左右 TODO 低内存共享Slot,预创建Slot
-	slot, err = d.createSlot(ctx, requestId, &resourceConfig, client)
-	if err != nil {
-		m2.Printf("createFailed:%s", fmt.Sprintf("create slot failed with: %s", err.Error()))
-		return
-	}
+	slot = s.pool.Fetch(ctx, requestId, s, client)
 	// 2.经过100ms后，可能经过Idle，onWait已小于OnCreate，此时直接销毁Slot，return
 	// 加锁避免各个线程都依次减少
 	s.Lock.Lock()
 	if d.getInitIndex(s, id)+1 > int(s.OnWait.Load()) {
 		s.Lock.Unlock()
 		m2.Printf("quickDel")
-		go func() {
-			m2.Printf("fastDelete:%s", s.MetaData.Key)
-			d.transferDelete(uuid.NewString(), slot.Id, instanceId, s.MetaData.Key, "fastDelete")
-			m2.ReqLog(requestId, s.MetaData.Key, instanceId, "fastConsume1", time.Since(start).Milliseconds())
-		}()
+		m2.Printf("fastDelete:%s", s.MetaData.Key)
+		s.pool.Return(slot, requestId, s, client)
+		m2.ReqLog(requestId, s.MetaData.Key, instanceId, "fastConsume1", time.Since(start).Milliseconds())
 		return
 	}
 	s.Lock.Unlock()

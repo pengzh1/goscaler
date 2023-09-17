@@ -49,6 +49,17 @@ func PartitionV1(data []int32) *[2]*Cluster {
 	return cc
 }
 
+// PartitionV2 资源池的目的主要是区分是否有周期性的burst流量，此时若存在间隔<1秒的请求，并且大间隔大于20秒，就可触发此规则
+func PartitionV2(data []int32) *[2]*Cluster {
+	cc := PartitionTwo(data)
+	for cc[0].Max > cc[0].Min*10 && cc[0].Max > 10000 {
+		cc2 := PartitionTwo(cc[0].Points)
+		cc[0] = cc2[0]
+		cc[1] = Merge(cc2[1], cc[1])
+	}
+	return cc
+}
+
 func Merge(c1 *Cluster, c2 *Cluster) *Cluster {
 	for _, c := range c1.Points {
 		c2.Points = append(c2.Points, c)

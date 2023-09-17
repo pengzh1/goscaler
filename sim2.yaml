@@ -19,7 +19,7 @@ spec:
             path: /Users/zhoupeng/Documents/mytest
       containers:
         - name: scaler
-          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v851
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v853
           command: [ "./run.sh" ]
           env:
             - name: "dev"
@@ -52,7 +52,7 @@ spec:
             path: /Users/zhoupeng/Documents/mytest
       containers:
         - name: scaler
-          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v851
+          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:v853
           command: [ "./run.sh" ]
           env:
             - name: "dev"

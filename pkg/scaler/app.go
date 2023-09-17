@@ -60,6 +60,7 @@ type BaseScheduler struct {
 	AvgExec      int32
 	Rule         *Rule
 	d            *Dispatcher
+	pool         *SlotPool
 }
 
 func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *BaseScheduler {
@@ -109,6 +110,7 @@ func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (
 	}
 	s.ReqCnt += 1
 	s.ITLock.Unlock()
+	s.pool.ReqRecord(s)
 	instanceId := uuid.New().String()
 	if m2.Dev {
 		defer func() {
@@ -159,6 +161,7 @@ func (s *BaseScheduler) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.
 		s.AvgExec = sum / int32(cnt)
 	}
 	s.ITLock.Unlock()
+	s.pool.EndRecord(int32(request.Result.DurationInMs))
 	_ = s.d.Idle(instanceId, uuid.NewString(), s.MetaData.Key, "idle", needDestroy)
 	return &pb.IdleReply{
 		Status:       pb.Status_Ok,
