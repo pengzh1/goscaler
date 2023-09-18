@@ -1,6 +1,8 @@
 package kmeans
 
 import (
+	m2 "github.com/AliyunContainerService/scaler/go/pkg/model"
+	"log"
 	"math/rand"
 	"time"
 )
@@ -73,6 +75,7 @@ func PartitionTwo(dataset []int32) *[2]*Cluster {
 	cc[0] = NewCluster(len(dataset))
 	cc[1] = NewCluster(len(dataset))
 	points := make([]int, len(dataset))
+	log.Printf("partFor:%v", dataset)
 	changes := 1
 	for i := 0; changes > 0; i++ {
 		changes = 0
@@ -87,27 +90,19 @@ func PartitionTwo(dataset []int32) *[2]*Cluster {
 				changes++
 			}
 		}
-
-		for ci := 0; ci < len(cc); ci++ {
-			if len(cc[ci].Points) == 0 {
-				var ri int
-				for {
-					// find a cluster with at least two data points, otherwise
-					// we're just emptying one cluster to fill another
-					ri = rand.Intn(len(dataset)) //nolint:gosec // rand.Intn is good enough for this
-					if len(cc[points[ri]].Points) > 1 {
-						break
-					}
-				}
-				cc[ci].Points = append(cc[ci].Points, dataset[ri])
-				points[ri] = ci
-
-				// Ensure that we always see at least one more iteration after
-				// randomly assigning a data point to a cluster
-				changes = len(dataset)
+		if len(cc[0].Points) == 0 || len(cc[1].Points) == 0 {
+			ri := rand.Intn(len(dataset))
+			if len(cc[0].Points) == 0 {
+				cc[0].Points = append(cc[0].Points, dataset[ri])
+				points[ri] = 0
+			} else if len(cc[1].Points) == 0 {
+				cc[1].Points = append(cc[1].Points, dataset[ri])
+				points[ri] = 1
 			}
+			// Ensure that we always see at least one more iteration after
+			// randomly assigning a data point to a cluster
+			changes = len(dataset)
 		}
-
 		if changes > 0 {
 			for _, c := range cc {
 				Recenter(c)
@@ -115,7 +110,7 @@ func PartitionTwo(dataset []int32) *[2]*Cluster {
 		}
 		if i == IterationThreshold ||
 			changes < int(float64(len(dataset))*deltaThreshold) {
-			//m2.Printf("Aborting:itr:%d,chg:%d,thr:%d", i, changes, int(float64(len(dataset))*deltaThreshold))
+			m2.Printf("Aborting:itr:%d,chg:%d,thr:%d", i, changes, int(float64(len(dataset))*deltaThreshold))
 			break
 		}
 	}
@@ -152,11 +147,12 @@ func Escape(p int32, c *Cluster) bool {
 	if p >= c.Min && p <= c.Max {
 		return false
 	}
-	if p > c.Max {
+	if p > c.Max && p-c.Max > 50 {
 		if p-c.Max > c.Center/10 || p-c.Max > 1800 {
 			return true
 		}
-	} else {
+	}
+	if p < c.Min && c.Min-p > 50 {
 		if c.Min-p > c.Center/10 || c.Min-p > 1800 {
 			return true
 		}

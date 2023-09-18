@@ -53,7 +53,7 @@ func NewSlotPool(memInMb uint64, addr string) *SlotPool {
 		ITTime:     new([200]int64),
 		ITData:     new([200]int32),
 		LastExec:   new([20]int32),
-		CacheChan:  make(chan *m2.Slot),
+		CacheChan:  make(chan *m2.Slot, 1024),
 		Rule:       &Rule{},
 		AppCnt:     0,
 		SumInit:    0,
@@ -78,7 +78,7 @@ func NewSlotPool(memInMb uint64, addr string) *SlotPool {
 			select {
 			case <-tick.C:
 				// 准入条件，请求记录大于200，或创建时间大于5分钟且请求数大于1
-				if pool.ReqCnt >= 10 || (time.Since(pool.CreateTime) > 2*time.Minute && pool.EndCnt > 2) {
+				if pool.ReqCnt >= 10 || (time.Since(pool.CreateTime) > 2*time.Minute && pool.EndCnt > 2) && memInMb < 512 {
 					pool.fundRule()
 				}
 			case <-tick2.C:
@@ -140,6 +140,7 @@ func (s *SlotPool) check() {
 		s.Lock.Lock()
 		defer s.Lock.Unlock()
 		var retain []*m2.Slot
+		nowMs := time.Now().UnixMilli()
 		// 2.onWait=0，检查idleChan是否已清空
 	loop:
 		for {
@@ -147,7 +148,7 @@ func (s *SlotPool) check() {
 			case ret := <-s.CacheChan:
 				s.IdleSize.Add(-1)
 				m2.ReqLog("", "", "", "fastConsume21", time.Since(ret.CreateTime).Milliseconds())
-				if time.Now().UnixMilli() > ret.GcMs {
+				if nowMs > ret.GcMs {
 					go func() {
 						_ = s.client.DestroySLot(context.Background(), "", ret.Id, "cacheTimeout3")
 						m2.Printf("cacheSendTimeout3:%d", s.MemInMb)
@@ -167,6 +168,10 @@ func (s *SlotPool) check() {
 }
 
 func (s *SlotPool) Fetch(ctx context.Context, reqId string, bs *BaseScheduler, client *platform_client2.PlatformClient) *m2.Slot {
+	if s.MemInMb > 1024 {
+		slot, _ := client.CreateSlot(ctx, reqId, s.Conf)
+		return slot
+	}
 	s.OnWait.Add(1)
 	defer s.OnWait.Add(-1)
 	if s.MemInMb > 1024 {
@@ -215,15 +220,15 @@ func (s *SlotPool) Fetch(ctx context.Context, reqId string, bs *BaseScheduler, c
 }
 
 func (s *SlotPool) Return(slot *m2.Slot, reqId string, bs *BaseScheduler, client *platform_client2.PlatformClient) {
-	tick := time.NewTimer(40 * time.Millisecond)
-	select {
-	case s.CacheChan <- slot:
-		s.IdleSize.Add(1)
-		m2.Printf("returnSendSuc2:%d", s.MemInMb)
-	case <-tick.C:
+	if s.MemInMb > 1024 {
 		_ = client.DestroySLot(context.Background(), reqId, slot.Id, "cacheTimeout2")
 		m2.Printf("cacheSendTimeout2:%d", s.MemInMb)
+		return
 	}
+	slot.GcMs = time.Now().UnixMilli() + 40
+	m2.Printf("cacheSendSuc:%d", s.MemInMb)
+	s.CacheChan <- slot
+	s.IdleSize.Add(1)
 }
 
 func (s *SlotPool) fundRule() {
@@ -262,9 +267,13 @@ func (s *SlotPool) fundRule() {
 		if A.Max < 1000 || (A.Max < 3000 && A.Center < 1000) && B.Min > 10000 {
 			rule.Valid = true
 			rule.PreCreateCnt = 2
-			if 100/A.Max > 3 {
+			if s.MemInMb < 300 {
+				rule.PreCreateCnt = 3
+			}
+			if 100/A.Center > 3 {
 				rule.PreCreateCnt = int(100/A.Max) - 1
 			}
+
 			rule.KeepAliveMs = int64(A.Max + 200)
 		}
 	}

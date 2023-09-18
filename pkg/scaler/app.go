@@ -56,6 +56,7 @@ type BaseScheduler struct {
 	ITTime         *[200]int64
 	ITData         *[200]int32
 	LastExec       *[20]int32
+	MaxIT          int32
 	InitMs         int32
 	AvgExec        int32
 	Rule           *Rule
@@ -107,6 +108,9 @@ func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (
 		s.LastTime = start.UnixMilli()
 	} else {
 		it := int32(start.UnixMilli() - s.LastTime)
+		if it > s.MaxIT {
+			s.MaxIT = it
+		}
 		s.ITTime[(s.ReqCnt-1)%len(s.ITTime)] = start.UnixMilli()
 		s.ITData[(s.ReqCnt-1)%len(s.ITTime)] = it
 		if s.Rule.Valid {

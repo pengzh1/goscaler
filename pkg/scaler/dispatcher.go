@@ -35,10 +35,10 @@ func RunDispatcher(ctx context.Context, config *config.Config) *Dispatcher {
 		Deleted:       sync.Map{},
 		config:        config,
 	}
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 40; i++ {
 		go dispatcher.runCreateHandler(ctx, config.ClientAddr, i)
 	}
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		go dispatcher.runDeleteHandler(ctx, config.ClientAddr, i)
 	}
 	go dispatcher.runGcChecker(ctx)
@@ -235,7 +235,6 @@ func (d *Dispatcher) GetOrCreate(metaData *m2.Meta) Scaler {
 	}
 	m2.Printf("Create new scaler for app %s", metaData.Key)
 	scheduler := NewBaseScheduler(metaData, d.config, d)
-	d.ScalerMap.Store(metaData.Key, scheduler)
 	d.ScalerSize.Add(1)
 	if p, ok := d.PoolMap[metaData.MemoryInMb]; ok {
 		scheduler.pool = p
@@ -244,6 +243,7 @@ func (d *Dispatcher) GetOrCreate(metaData *m2.Meta) Scaler {
 		d.PoolMap[metaData.MemoryInMb] = x
 		scheduler.pool = x
 	}
+	d.ScalerMap.Store(metaData.Key, scheduler)
 	d.rw.Unlock()
 	return scheduler
 }
@@ -423,25 +423,17 @@ func (d *Dispatcher) CreateNewPreWarm(ctx context.Context, instanceId, requestId
 	if !s.Rule.Valid {
 		return
 	}
-	m2.Printf("AssignNew,%s,%s", requestId, s.MetaData.Key)
-	resourceConfig := m2.SlotResourceConfig{
-		ResourceConfig: pb.ResourceConfig{
-			MemoryInMegabytes: s.MetaData.MemoryInMb,
-		},
-	}
+	m2.Printf("AssignNewPreWarm,%s,%s", requestId, s.MetaData.Key)
 	var slot *m2.Slot
 	var err error
 	// 1. 创建Slot 100ms左右 TODO 低内存共享Slot,预创建Slot
-	slot, err = d.createSlot(ctx, requestId, &resourceConfig, client)
-	if err != nil {
-		m2.Printf("createFailed:%s", fmt.Sprintf("create slot failed with: %s", err.Error()))
-		return
-	}
+	slot = s.pool.Fetch(ctx, requestId, s, client)
 	if !s.Rule.Valid {
+		m2.Printf("fastDeletePreWarm,%s,%s", requestId, s.MetaData.Key)
 		d.transferDelete(uuid.NewString(), slot.Id, instanceId, s.MetaData.Key, "fastDelete")
 		return
 	}
-	m2.Printf("AssignInit,%s,%s", requestId, s.MetaData.Key)
+	m2.Printf("AssignInitPreWarn,%s,%s", requestId, s.MetaData.Key)
 	rMeta := &m2.Meta{
 		Meta: pb.Meta{
 			Key:           s.MetaData.Key,
