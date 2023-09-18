@@ -34,8 +34,9 @@ type PlatformClient struct {
 }
 
 func New(addr string) (Client, error) {
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials())) //grpc.WithWriteBufferSize(0),
-	//grpc.WithReadBufferSize(0),
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithWriteBufferSize(1024*1024),
+		grpc.WithReadBufferSize(1024*1024))
 
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)

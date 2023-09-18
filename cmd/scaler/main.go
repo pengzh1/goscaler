@@ -42,8 +42,9 @@ func run() {
 		grpc.MaxConcurrentStreams(1000),
 		grpc.InitialWindowSize(1024*1024),
 		grpc.InitialConnWindowSize(16*1024*1024),
-		//grpc.ReadBufferSize(1024*512),
-		//grpc.WriteBufferSize(1024*512)
+		grpc.ReadBufferSize(1024*512),
+		grpc.WriteBufferSize(1024*512),
+		grpc.NumStreamWorkers(16),
 	)
 	scaleServer := server.New()
 	pb.RegisterScalerServer(s, scaleServer)

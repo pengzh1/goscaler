@@ -53,6 +53,7 @@ func (s *Server) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.Ass
 }
 
 func (s *Server) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.IdleReply, error) {
+	model.Printf("startIdle:%s", request.Assigment.RequestId)
 	go func() {
 		if request.Assigment == nil {
 			log.Printf("assignment is nil")

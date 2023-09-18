@@ -64,36 +64,36 @@ spec:
           volumeMounts:
             - name: mytest
               mountPath: /tmp/data
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: $NAME3
-  labels:
-    app: $NAME3
-spec:
-  template:
-    metadata:
-      name: $NAME3
-      labels:
-        app: $NAME3
-    spec:
-      restartPolicy: Never
-      volumes:
-        - name: mytest
-          hostPath:
-            path: /Users/zhoupeng/Documents/mytest
-      containers:
-        - name: scaler
-          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:$VERSION
-          command: [ "./run.sh" ]
-          env:
-            - name: "dev"
-              value: "true"
-        - name: serverless-simulator
-          image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.5
-          command: [ "./run.sh" ]
-          args: [ "$DATA3" ]
-          volumeMounts:
-            - name: mytest
-              mountPath: /tmp/data
+#---
+#apiVersion: batch/v1
+#kind: Job
+#metadata:
+#  name: $NAME3
+#  labels:
+#    app: $NAME3
+#spec:
+#  template:
+#    metadata:
+#      name: $NAME3
+#      labels:
+#        app: $NAME3
+#    spec:
+#      restartPolicy: Never
+#      volumes:
+#        - name: mytest
+#          hostPath:
+#            path: /Users/zhoupeng/Documents/mytest
+#      containers:
+#        - name: scaler
+#          image: registry.cn-hangzhou.aliyuncs.com/beeper/scaler:$VERSION
+#          command: [ "./run.sh" ]
+#          env:
+#            - name: "dev"
+#              value: "true"
+#        - name: serverless-simulator
+#          image: registry.cn-beijing.aliyuncs.com/cloudnative-challenge/simulator:v1.3.5
+#          command: [ "./run.sh" ]
+#          args: [ "$DATA3" ]
+#          volumeMounts:
+#            - name: mytest
+#              mountPath: /tmp/data
