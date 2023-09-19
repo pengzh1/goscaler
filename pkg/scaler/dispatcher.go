@@ -21,7 +21,12 @@ type Dispatcher struct {
 	PoolMap       map[uint64]*SlotPool
 	Deleted       sync.Map
 	ScalerSize    atomic.Int32
+	ReqCnt        atomic.Int64
+	Last          atomic.Int64
+	Max           atomic.Int64
+	Term          atomic.Bool
 	rw            sync.RWMutex
+	CreateTime    time.Time
 	config        *config.Config
 }
 
@@ -33,6 +38,11 @@ func RunDispatcher(ctx context.Context, config *config.Config) *Dispatcher {
 		ScalerMap:     sync.Map{},
 		PoolMap:       make(map[uint64]*SlotPool),
 		Deleted:       sync.Map{},
+		ReqCnt:        atomic.Int64{},
+		Last:          atomic.Int64{},
+		Max:           atomic.Int64{},
+		CreateTime:    time.Now(),
+		Term:          atomic.Bool{},
 		config:        config,
 	}
 	for i := 0; i < 40; i++ {
@@ -71,6 +81,10 @@ func (d *Dispatcher) runCreateHandler(ctx context.Context, ClientAddr string, id
 	for {
 		select {
 		case checkEvent := <-d.WaitCheckChan:
+			if d.fastTerm() {
+				m2.Printf("termExit")
+				continue
+			}
 			start := time.Now()
 			if checkEvent.PreWarm {
 				d.preWarm(checkEvent.Scaler, checkEvent.RequestId, checkEvent.InstanceId, client.(*platform_client2.PlatformClient), checkEvent)
@@ -101,6 +115,13 @@ func (d *Dispatcher) runDeleteHandler(ctx context.Context, ClientAddr string, id
 }
 
 func (d *Dispatcher) Fetch(instanceId string, requestId string, meta *m2.Meta) *m2.Instance {
+	t := time.Now().UnixMilli()
+	x := d.Last.Load()
+	d.Last.Store(t)
+	n := d.ReqCnt.Add(1)
+	if n > 300 && t-x > d.Max.Load() {
+		d.Max.Store(t - x)
+	}
 	// 1.获取scaler
 	scaler, _ := d.ScalerMap.Load(meta.Key)
 	s := scaler.(*BaseScheduler)
@@ -189,7 +210,7 @@ func (d *Dispatcher) Idle(instanceId, requestId, meta, reason string, needDelete
 		if s.Rule.Valid {
 			// preWarm>0 直接删除实例，经过preWarm ms后自动创建，保活keepAlive ms后自动删除，自动删除时更新策略无效
 			if s.Rule.PreWarmMs > 0 && s.Rule.KeepAliveMs > 0 {
-				if s.Rule.GcSec == 0 {
+				if s.Rule.GcMill == 0 {
 					d.transferDelete(uuid.NewString(), instance.Slot.Id, instanceId, meta, "ruleFastDelete")
 					createEvent := &CreateEvent{
 						InstanceId: uuid.NewString(),
@@ -515,5 +536,34 @@ func (d *Dispatcher) init(initRec chan *m2.Instance, requestId string, instId st
 	case initRec <- instance:
 		m2.Printf("initSendSuccess")
 		close(initRec)
+	}
+}
+
+func (d *Dispatcher) fastTerm() bool {
+	return d.Term.Load()
+}
+
+func (d *Dispatcher) fastTermCheck() {
+	now := time.Now()
+	reqCnt := d.ReqCnt.Load()
+	quickMill := 50 * 60 * 1000
+	if m2.Dev {
+		quickMill = 5 * 60 * 1000
+	}
+	if now.Sub(d.CreateTime).Milliseconds() > int64(quickMill) {
+		if reqCnt > 100000 && now.UnixMilli()-d.Last.Load() > d.Max.Load()+5000 {
+			m2.Printf("fastTerm")
+			d.Term.Store(true)
+		} else if now.UnixMilli()-d.Last.Load() > d.Max.Load()+10000 {
+			m2.Printf("fastTerm")
+			d.Term.Store(true)
+		} else if now.UnixMilli()-d.Last.Load() > 122000 {
+			m2.Printf("fastTerm")
+			d.Term.Store(true)
+		} else {
+			d.Term.Store(false)
+		}
+	} else {
+		d.Term.Store(false)
 	}
 }

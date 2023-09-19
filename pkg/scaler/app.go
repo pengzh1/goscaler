@@ -95,6 +95,7 @@ func NewBaseScheduler(metaData *m2.Meta, config *config.Config, d *Dispatcher) *
 }
 
 func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (*pb.AssignReply, error) {
+	s.d.Term.Store(false)
 	cur := s.CurWorking.Add(1)
 	if cur > s.CurMaxWorking {
 		s.CurMaxWorking = cur
@@ -118,6 +119,7 @@ func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (
 			if kmeans.Escape(it, s.Rule.Cluster[0]) && kmeans.Escape(it, s.Rule.Cluster[1]) {
 				s.Rule.Valid = false
 				m2.Printf("ruleInvalid:%s,%d", s.MetaData.Key, it)
+				s.FundRule()
 			}
 		}
 		s.LastTime = start.UnixMilli()

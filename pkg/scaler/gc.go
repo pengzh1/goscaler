@@ -5,16 +5,16 @@ import (
 	"github.com/AliyunContainerService/scaler/go/pkg/kmeans"
 	m2 "github.com/AliyunContainerService/scaler/go/pkg/model"
 	"github.com/google/uuid"
-	"log"
 	"sort"
 	"time"
 )
 
 func (d *Dispatcher) runGcChecker(ctx context.Context) {
-	tick := time.NewTicker(120 * time.Millisecond)
+	tick := time.NewTicker(130 * time.Millisecond)
 	for {
 		select {
 		case <-tick.C:
+			d.fastTermCheck()
 			ss := make([]*BaseScheduler, 0, d.ScalerSize.Load())
 			d.ScalerMap.Range(func(key, value any) bool {
 				if value != nil {
@@ -105,8 +105,8 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 	if time.Since(s.LastKm) > 10*time.Second {
 		s.LastKm = time.Now()
 		// 准入条件，请求记录大于200，或创建时间大于5分钟且请求数大于1
-		if s.ReqCnt >= 10 || (time.Since(s.CreateTime) > 2*time.Minute && s.ReqCnt > 1) {
-			s.fundRule()
+		if s.ReqCnt >= 10 || (time.Since(s.CreateTime) > 2*time.Minute) || (time.Since(s.CreateTime) > 1*time.Minute && s.ReqCnt > 1 && s.InitMs < 80 && s.AvgExec < 80) {
+			s.FundRule()
 		}
 	}
 	s.Lock.Lock()
@@ -121,13 +121,13 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 			element := cur
 			instance := element.Value.(*m2.Instance)
 			idleDuration := time.Now().Sub(instance.LastIdleTime)
-			if idleDuration > s.GetIdleDurationBeforeGC(instance) {
+			if idleDuration > s.GetIdleDurationBeforeGC(instance, int(preSize)-delta) {
 				if instance.KeepAliveMs > 0 && instance.LastStart.Sub(instance.LastIdleTime).Milliseconds() == 0 {
 					m2.Printf("ruleFastDelete:%s", s.MetaData.Key)
 					//s.Rule.Valid = false
 				}
 				m2.Printf("Idle duration: %dms, time excceed configured: %dms", idleDuration.Milliseconds(),
-					s.GetIdleDurationBeforeGC(instance).Milliseconds())
+					s.GetIdleDurationBeforeGC(instance, int(preSize)-delta).Milliseconds())
 				s.idleInstance.Remove(element)
 				delta += 1
 				m2.ReqLog("", s.MetaData.Key, "", "fastConsume10", idleDuration.Milliseconds())
@@ -139,8 +139,8 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 			cur = next
 		}
 		m2.Printf("GcEndSize %s,%d,%d,%d,%d,%d", s.MetaData.Key, s.idleInstance.Len(), s.IdleSize.Load(), s.OnWait.Load(), s.OnCreate.Load(), s.InstanceSize.Load())
-		if preSize > 0 && preSize == int32(delta) {
-			if s.Rule.Valid && s.Rule.PreWarmMs > 0 && s.Rule.KeepAliveMs > 0 && s.Rule.GcSec > 0 {
+		if preSize > 0 && preSize == int32(delta) && !s.d.fastTerm() {
+			if s.Rule.Valid && s.Rule.PreWarmMs > 0 && s.Rule.KeepAliveMs > 0 && s.Rule.GcMill > 0 {
 				preWarm := s.Rule.PreWarmMs
 				preWarm -= time.Now().UnixMilli() - s.LastTime
 				m2.Printf("preWarmAfter:%s,%d,%d,%d", s.MetaData.Key, preWarm, s.Rule.KeepAliveMs, s.Rule.PreCreateCnt)
@@ -171,7 +171,7 @@ func (d *Dispatcher) GC(s *BaseScheduler) {
 		s.LastKm = time.Now()
 		// 准入条件，请求记录大于200，或创建时间大于5分钟且请求数大于1
 		if s.ReqCnt >= 10 || (time.Since(s.CreateTime) > 2*time.Minute && s.ReqCnt > 2) {
-			s.fundRule()
+			s.FundRule()
 		}
 	}
 }
@@ -184,12 +184,16 @@ type Rule struct {
 	PreWarmMs    int64
 	KeepAliveMs  int64
 	MaxMs        int
-	GcSec        int
+	GcMill       int
+	GcSingleMill int
 	Valid        bool
 	PreCreateCnt int
 }
 
-func (s *BaseScheduler) fundRule() {
+func (s *BaseScheduler) FundRule() {
+	if s.d.fastTerm() {
+		return
+	}
 	// 对目前的请求到达间隔进行二分类
 	rawData := s.ITData[:]
 	maxIt := int32(0)
@@ -207,7 +211,7 @@ func (s *BaseScheduler) fundRule() {
 		if dur < 70000 {
 			dur = 70000
 		}
-		req := s.ReqCnt - 1
+		req := s.ReqCnt - 2
 		start := req - 200
 		if start < 0 {
 			start = -1
@@ -229,7 +233,7 @@ func (s *BaseScheduler) fundRule() {
 		PreWarmMs:   0,
 		KeepAliveMs: 0,
 		MaxMs:       0,
-		GcSec:       40,
+		GcMill:      40000,
 		Valid:       false,
 	}
 	if len(data) > 1 {
@@ -240,7 +244,6 @@ func (s *BaseScheduler) fundRule() {
 		B := cs[1]
 		// 1.初始化时间<80MS,冷启动时间少，执行时间少，资源浪费大的应用，可能有多个较大周期，
 		//  此类应用初始化时间极少，核心目标是找到一个可以放心GC的时间间隔，不需要过多考虑预创建
-		//  数据集1，2 前置条件判断
 		if s.InitMs < 80 && s.AvgExec < 80 {
 			if time.Now().UnixMilli()-s.LastTime > int64(B.Max) {
 				s.Rule = rule
@@ -248,26 +251,32 @@ func (s *BaseScheduler) fundRule() {
 			}
 			if A.Min > 10000 && B.Max-A.Min < A.Min/5 {
 				// 固定周期单次执行类型，执行完毕后，立即销毁，发起一个定时实例创建
-				// 延迟时间：A.Min-2S, 存活时间A.MAX-A.Min+2S
-				rule.PreWarmMs = int64(A.Min - 2000)
-				rule.KeepAliveMs = int64(B.Max - A.Min + 4000)
-				rule.GcSec = 0
+				// 延迟时间：A.Min-1S, 存活时间B.MAX-A.Min+3S
+				rule.PreWarmMs = int64(A.Min - 1000)
+				rule.KeepAliveMs = int64(B.Max - A.Min + 3000)
+				rule.GcMill = 0
 				rule.Cate = "single"
 				rule.Valid = true
 				rule.PreCreateCnt = 1
 			} else if B.Max-B.Min < B.Min/10 && B.Min > 15000 && A.Max < 2000 {
-				// 固定周期多次执行类型，执行完毕后，立即销毁，发起一个定时实例创建
-				// 延迟时间：B.Min-2S, 存活时间B.Max-B.Min+3S
-				rule.PreWarmMs = int64(B.Min - 1000)
-				rule.KeepAliveMs = int64(B.Max - B.Min + 2000)
+				// 固定周期多次执行类型，执行完毕后，等待一段时间后销毁，实例清零时发起一个定时实例创建
+				// 延迟时间：B.Min-1S, 存活时间B.Max-B.Min+3S
+				rule.PreWarmMs = int64(B.Min - 1200)
+				rule.KeepAliveMs = int64(B.Max - B.Min + 3000)
 				if rule.KeepAliveMs > 40000 {
 					rule.KeepAliveMs = 40000
 				}
-				rule.GcSec = int(A.Max/1000 + 1)
+				rule.GcMill = int(A.Max + 1000)
+				if A.Max < 500 {
+					rule.GcMill = int(A.Max * 2)
+				}
+				if A.Max < 100 {
+					rule.GcMill = int(A.Max + 200)
+				}
 				rule.Cate = "multi"
 				rule.Valid = true
 				rule.PreCreateCnt = 1
-				log.Printf("%sMaxWorking%d", s.MetaData.Key, s.LastMaxWorking)
+				m2.Printf("%sMaxWorking%d", s.MetaData.Key, s.LastMaxWorking)
 				if s.LastMaxWorking > 1 {
 					rule.PreCreateCnt = 2
 				}
@@ -277,38 +286,50 @@ func (s *BaseScheduler) fundRule() {
 			} else {
 				// 1.2 集合B的Min>Gc时间，这一部分的数据是一定会冷启动的，此时我们可以找到一个时间节点提前GC，节约资源
 				if B.Min > 40000 {
-					// 集合A的Max<15秒，然后我们将GC时间调整为MaxA+3秒
+					// 集合A的Max<15秒，然后我们将GC时间调整为MaxA+2秒
 					if A.Max < 20000 {
 						rule.Valid = true
-						rule.GcSec = int(A.Max)/1000 + 1
+						rule.GcMill = int(A.Max + 2000)
+						if A.Max < 600 {
+							rule.GcMill = int(A.Max * 2)
+						}
+						if A.Max < 100 {
+							rule.GcMill = int(A.Max + 200)
+						}
 					} else if A.Min > 40000 {
 						rule.Valid = true
 						// 集合A的Min也大于40秒，说明是长周期单次执行类型，我们将GC策略调整为立即删除
-						rule.GcSec = 0
+						rule.GcMill = 0
 					}
 				} else if (A.Max < 1000 || (A.Max < 3000 && A.Center < 1000)) && B.Min > 20000 && len(A.Points) > 5*len(B.Points) {
 					rule.Valid = true
 					// 集合BMin>20秒，但此时集合A的数量比较大，且间隔很短，此时提前GC也是有收益的
-					rule.GcSec = int(A.Max)/1000 + 1
+					rule.GcMill = int(A.Max + 1000)
+					if A.Max < 500 {
+						rule.GcMill = int(A.Max * 2)
+					}
+					if A.Max < 100 {
+						rule.GcMill = int(A.Max + 200)
+					}
 				}
 			}
 		}
-		//  数据集3 前置条件判断
+		//  长初始化周期类型
 		if s.InitMs > 1000 {
 			if time.Now().UnixMilli()-s.LastTime > int64(B.Max) {
 				s.Rule = rule
 				return
 			}
-			if A.Min > 20000 && B.Max-A.Min < A.Min/5 {
+			if A.Min > 25000 && B.Max-A.Min < A.Min/5 {
 				// 固定周期单次执行类型，执行完毕后，立即销毁，发起一个定时实例创建
 				// 延迟时间：A.Min-2S-InitTime, 存活时间A.MAX-A.Min+2S
 				rule.PreWarmMs = int64(A.Min - 2000 - s.InitMs)
 				rule.KeepAliveMs = int64(B.Max - A.Min + 4000)
-				rule.GcSec = 0
+				rule.GcMill = 0
 				rule.Cate = "single"
 				rule.Valid = true
 				rule.PreCreateCnt = 1
-			} else if B.Max-B.Min < B.Min/10 && B.Min > 20000 && A.Max < 2000 {
+			} else if B.Max-B.Min < B.Min/10 && B.Min > 20000 && A.Max < 2000 && s.AvgExec > 3 {
 				// 固定周期多次执行类型，实例全部销毁后，发起N个实例创建，N=lastMaxWorking
 				// 延迟时间：B.Min-2S, 存活时间B.Max-B.Min+2S
 				rule.PreWarmMs = int64(B.Min - 2000 - s.InitMs)
@@ -316,7 +337,7 @@ func (s *BaseScheduler) fundRule() {
 				if rule.KeepAliveMs > 40000 {
 					rule.KeepAliveMs = 40000
 				}
-				rule.GcSec = int(A.Max/1000 + 2)
+				rule.GcMill = int(A.Max + 2000)
 				rule.Cate = "multi"
 				rule.Valid = true
 				rule.PreCreateCnt = int(s.LastMaxWorking)
@@ -324,21 +345,29 @@ func (s *BaseScheduler) fundRule() {
 					rule.PreCreateCnt = 1
 				}
 			} else {
-				// 1.2 集合B的Min>Gc时间，这一部分的数据是一定会冷启动的，此时我们可以找到一个时间节点提前GC，节约资源
-				if B.Min > 40000 {
+				// 超短执行时间的应用，且间隔周期不固定的应用，预留实例
+				if s.InitMs > 5000 && s.AvgExec < 5 && s.MetaData.MemoryInMb < 2000 && A.Center > 10 {
+					rule.Valid = true
+					rule.GcMill = int(B.Max + 10000)
+					rule.GcSingleMill = int(B.Max + 60000)
+					if rule.GcSingleMill < 300000 {
+						rule.GcSingleMill = 300000
+					}
+					// 集合B的Min>Gc时间，这一部分的数据是一定会冷启动的，此时我们可以找到一个时间节点提前GC，节约资源
+				} else if B.Min > 40000 {
 					// 集合A的Max<15秒，然后我们将GC时间调整为MaxA+3秒
 					if A.Max < 20000 {
 						rule.Valid = true
-						rule.GcSec = int(A.Max)/1000 + 3
+						rule.GcMill = int(A.Max) + 3000
 					} else if A.Min > 40000 {
 						rule.Valid = true
 						// 集合A的Min也大于40秒，说明是长周期单次执行类型，我们将GC策略调整为立即删除
-						rule.GcSec = 0
+						rule.GcMill = 0
 					}
 				} else if (A.Max < 1000 || (A.Max < 3000 && A.Center < 1000)) && B.Min > 20000 && len(A.Points) > 5*len(B.Points) && s.MetaData.MemoryInMb > 2048 {
 					rule.Valid = true
 					// 集合BMin>20秒，但此时集合A的数量比较大，且间隔很短，此时提前GC也是有收益的
-					rule.GcSec = int(A.Max)/1000 + 5
+					rule.GcMill = int(A.Max + 5000)
 				}
 			}
 		}

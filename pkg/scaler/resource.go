@@ -247,7 +247,7 @@ func (s *SlotPool) fundRule() {
 		PreWarmMs:   0,
 		KeepAliveMs: 0,
 		MaxMs:       0,
-		GcSec:       40,
+		GcMill:      50,
 		Valid:       false,
 	}
 	// 1.初始化时间<80MS,冷启动时间少，执行时间少，资源浪费大的应用，可能有多个较大周期，
