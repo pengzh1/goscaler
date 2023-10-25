@@ -34,6 +34,7 @@ type SlotPool struct {
 	AppCnt     int
 	SumInit    int
 	SumExec    int
+	CurFail    atomic.Int32
 	Conf       *m2.SlotResourceConfig
 	idleSlot   *list.List
 	client     *platform_client2.PlatformClient
@@ -73,7 +74,7 @@ func NewSlotPool(memInMb uint64, addr string) *SlotPool {
 	m2.Printf("NewSlotPool for mem: %s is created", memInMb)
 	go func() {
 		tick := time.NewTicker(5 * time.Second)
-		tick2 := time.NewTicker(50 * time.Millisecond)
+		tick2 := time.NewTicker(100 * time.Millisecond)
 		for {
 			select {
 			case <-tick.C:
@@ -168,16 +169,13 @@ func (s *SlotPool) check() {
 }
 
 func (s *SlotPool) Fetch(ctx context.Context, reqId string, bs *BaseScheduler, client *platform_client2.PlatformClient) *m2.Slot {
-	if s.MemInMb > 1024 {
+	// 高内存对象不使用资源池
+	if s.MemInMb >= 500 {
 		slot, _ := client.CreateSlot(ctx, reqId, s.Conf)
 		return slot
 	}
 	s.OnWait.Add(1)
 	defer s.OnWait.Add(-1)
-	if s.MemInMb > 1024 {
-		slot, _ := client.CreateSlot(ctx, reqId, s.Conf)
-		return slot
-	}
 	for s.OnCreate.Load()+s.IdleSize.Load() < s.OnWait.Load() {
 		s.OnCreate.Add(1)
 		go func() {
@@ -264,17 +262,17 @@ func (s *SlotPool) fundRule() {
 			return
 		}
 		// 周期性burst流量，有请求到来时，可用Slot数+创建中数=等待数+2
-		if A.Max < 1000 || (A.Max < 3000 && A.Center < 1000) && B.Min > 10000 {
+		if (A.Max < 1000 || (A.Max < 3000 && A.Center < 1000)) && B.Min > 10000 {
 			rule.Valid = true
 			rule.PreCreateCnt = 2
-			if s.MemInMb < 300 {
-				rule.PreCreateCnt = 3
-			}
-			if 100/A.Center > 3 {
-				rule.PreCreateCnt = int(100/A.Max) - 1
-			}
+			//if s.MemInMb < 300 {
+			//	rule.PreCreateCnt = 3
+			//}
+			//if 100/A.Center > 3 {
+			//	rule.PreCreateCnt = int(100/A.Max) - 1
+			//}
 
-			rule.KeepAliveMs = int64(A.Max + 200)
+			rule.KeepAliveMs = int64(A.Max + 120)
 		}
 	}
 	if rule.Valid == true {

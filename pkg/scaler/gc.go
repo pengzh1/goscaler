@@ -34,7 +34,7 @@ func (d *Dispatcher) runGcChecker(ctx context.Context) {
 }
 func (d *Dispatcher) runGc(s *BaseScheduler) {
 	start := time.Now()
-	if s.OnCreate.Load() < s.OnWait.Load() && s.OnCreate.Load() < 100 {
+	if s.OnCreate.Load() < s.OnWait.Load() && s.OnCreate.Load() < 60 {
 		// 1.onCreate小于onWait，触发一次创建检查事件
 		createEvent := &CreateEvent{
 			InstanceId: "sup" + uuid.NewString(),
@@ -101,8 +101,49 @@ func (d *Dispatcher) runGc(s *BaseScheduler) {
 	s.GcCnt += 1
 }
 
+func (s *BaseScheduler) GetGcInterval() time.Duration {
+	//if avgExec > 1000 && avgExec/initDuration >= 1 {
+	//	return 2 * time.Second
+	//}
+	//
+	//if avgExec > 500 && avgExec/initDuration >= 1 {
+	//	return 5 * time.Second
+	//}
+	if s.InitMs < 80 && s.AvgExec < 80 {
+		return 200 * time.Millisecond
+	}
+	return 1500 * time.Millisecond
+}
+
+func (s *BaseScheduler) GetIdleDurationBeforeGC(inst *m2.Instance, remain int) time.Duration {
+	if s.d.fastTerm() {
+		return 10 * time.Millisecond
+	}
+	// PreWarm实例在KeepAlive时间后销毁
+	if inst.KeepAliveMs > 0 && inst.LastStart.Sub(inst.LastIdleTime).Milliseconds() == 0 {
+		return time.Duration(inst.KeepAliveMs) * time.Millisecond
+	}
+	// 策略Gc时间
+	if s.Rule.Valid && s.Rule.GcMill > 0 {
+		if remain == 1 && s.Rule.GcSingleMill > 0 {
+			return time.Duration(s.Rule.GcSingleMill) * time.Millisecond
+		}
+		return time.Duration(s.Rule.GcMill) * time.Millisecond
+	}
+	// 短周期实例避免请求集中过度启动实例，做quota限制
+	if s.AvgExec < 100 && remain > 8 {
+		return 3 * time.Second
+	}
+	if s.AvgExec > 0 && s.AvgExec < 80 && s.InitMs < 80 && remain > 1 {
+		if remain > int(s.LastMaxWorking) && remain > int(s.CurMaxWorking) && remain > int(s.CurWorking.Load()) {
+			return 3 * time.Second
+		}
+	}
+	return s.config.IdleDurationBeforeGC
+}
+
 func (d *Dispatcher) GC(s *BaseScheduler) {
-	if time.Since(s.LastKm) > 10*time.Second {
+	if time.Since(s.LastKm) > 10*time.Second || (s.AvgExec < 100 && s.InitMs < 100 && time.Since(s.LastKm) > 3*time.Second) {
 		s.LastKm = time.Now()
 		// 准入条件，请求记录大于200，或创建时间大于5分钟且请求数大于1
 		if s.ReqCnt >= 10 || (time.Since(s.CreateTime) > 2*time.Minute) || (time.Since(s.CreateTime) > 1*time.Minute && s.ReqCnt > 1 && s.InitMs < 80 && s.AvgExec < 80) {
@@ -252,8 +293,8 @@ func (s *BaseScheduler) FundRule() {
 			if A.Min > 10000 && B.Max-A.Min < A.Min/5 {
 				// 固定周期单次执行类型，执行完毕后，立即销毁，发起一个定时实例创建
 				// 延迟时间：A.Min-1S, 存活时间B.MAX-A.Min+3S
-				rule.PreWarmMs = int64(A.Min - 1000)
-				rule.KeepAliveMs = int64(B.Max - A.Min + 3000)
+				rule.PreWarmMs = int64(A.Min - 800)
+				rule.KeepAliveMs = int64(B.Max - A.Min + 2000)
 				rule.GcMill = 0
 				rule.Cate = "single"
 				rule.Valid = true
@@ -277,12 +318,15 @@ func (s *BaseScheduler) FundRule() {
 				rule.Valid = true
 				rule.PreCreateCnt = 1
 				m2.Printf("%sMaxWorking%d", s.MetaData.Key, s.LastMaxWorking)
-				if s.LastMaxWorking > 1 {
+				if s.LastMaxWorking > 2 {
 					rule.PreCreateCnt = 2
 				}
 				if s.LastMaxWorking > 4 {
 					rule.PreCreateCnt = 3
 				}
+			} else if (A.Max < 1000 || A.Max < 3000 && A.Center < 1000) && (B.Max < 1000 || B.Max > 20000) && s.MetaData.MemoryInMb < 1000 {
+				rule.Valid = true
+				rule.GcMill = int(A.Max + 1500)
 			} else {
 				// 1.2 集合B的Min>Gc时间，这一部分的数据是一定会冷启动的，此时我们可以找到一个时间节点提前GC，节约资源
 				if B.Min > 40000 {
@@ -315,7 +359,7 @@ func (s *BaseScheduler) FundRule() {
 			}
 		}
 		//  长初始化周期类型
-		if s.InitMs > 1000 {
+		if s.InitMs > 100 {
 			if time.Now().UnixMilli()-s.LastTime > int64(B.Max) {
 				s.Rule = rule
 				return
@@ -344,9 +388,21 @@ func (s *BaseScheduler) FundRule() {
 				if s.LastMaxWorking == 0 {
 					rule.PreCreateCnt = 1
 				}
+			} else if s.AvgExec > 5000 {
+				// 持续性任务，结束后立即回收
+				if s.AvgExec > 15000 {
+					rule.GcMill = 0
+				} else {
+					rule.GcMill = 3000
+				}
+				rule.Valid = true
 			} else {
 				// 超短执行时间的应用，且间隔周期不固定的应用，预留实例
-				if s.InitMs > 5000 && s.AvgExec < 5 && s.MetaData.MemoryInMb < 2000 && A.Center > 10 {
+				if B.Max < 10000 && B.Min > 800 && (A.Center < 20 || B.Center > 8*A.Center) && s.MetaData.MemoryInMb > 2048 && s.InitMs < 1000 {
+					rule.Valid = true
+					rule.GcMill = int(B.Max)
+					rule.GcSingleMill = int(B.Max + 10000)
+				} else if s.InitMs > 5000 && s.AvgExec < 6 && s.MetaData.MemoryInMb < 2000 && A.Center > 10 {
 					rule.Valid = true
 					rule.GcMill = int(B.Max + 10000)
 					rule.GcSingleMill = int(B.Max + 60000)

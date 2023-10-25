@@ -17,6 +17,7 @@ import (
 type Dispatcher struct {
 	WaitCheckChan chan *CreateEvent
 	DeleteChan    chan *DeleteEvent
+	IdleEventChan chan *pb.IdleRequest
 	ScalerMap     sync.Map
 	PoolMap       map[uint64]*SlotPool
 	Deleted       sync.Map
@@ -34,6 +35,7 @@ func RunDispatcher(ctx context.Context, config *config.Config) *Dispatcher {
 	dispatcher := &Dispatcher{
 		WaitCheckChan: make(chan *CreateEvent, 1024),
 		DeleteChan:    make(chan *DeleteEvent, 1024),
+		IdleEventChan: make(chan *pb.IdleRequest, 2048),
 		ScalerSize:    atomic.Int32{},
 		ScalerMap:     sync.Map{},
 		PoolMap:       make(map[uint64]*SlotPool),
@@ -47,6 +49,9 @@ func RunDispatcher(ctx context.Context, config *config.Config) *Dispatcher {
 	}
 	for i := 0; i < 40; i++ {
 		go dispatcher.runCreateHandler(ctx, config.ClientAddr, i)
+	}
+	for i := 0; i < 20; i++ {
+		go dispatcher.runIdleHandler(ctx)
 	}
 	for i := 0; i < 10; i++ {
 		go dispatcher.runDeleteHandler(ctx, config.ClientAddr, i)
@@ -92,6 +97,24 @@ func (d *Dispatcher) runCreateHandler(ctx context.Context, ClientAddr string, id
 				d.checkWait(checkEvent.Scaler, checkEvent.RequestId, checkEvent.InstanceId, client.(*platform_client2.PlatformClient))
 			}
 			m2.Printf("worker%d check runEnd %dus", id, time.Since(start).Microseconds())
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+func (d *Dispatcher) runIdleHandler(ctx context.Context) {
+	for {
+		select {
+		case request := <-d.IdleEventChan:
+			if request.Assigment == nil {
+				continue
+			}
+			key := request.Assigment.MetaKey
+			scheduler, _ := d.Get(key)
+			_, err := scheduler.Idle(ctx, request)
+			if err != nil {
+				log.Printf("assignment failed")
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -293,7 +316,7 @@ func (d *Dispatcher) checkWait(s *BaseScheduler, reqId, instId string, client *p
 		}
 	}
 	// 2.onWait小于OnCreate，或onCrete大于1000，本次不创建实例，直接返回
-	if s.OnCreate.Load() > s.OnWait.Load() || s.OnCreate.Load() > 100 {
+	if s.OnCreate.Load() > s.OnWait.Load() || s.OnCreate.Load() > 60 {
 		m2.Printf("dropCreateEvent:" + s.MetaData.Key)
 		return
 	}
@@ -411,7 +434,7 @@ func (d *Dispatcher) CreateNew(ctx context.Context, instanceId, requestId string
 				s.InstanceSize.Add(1)
 				s.IdleChan <- result
 				s.IdleSize.Add(1)
-				m2.Printf("sendSuc")
+				m2.ReqLog(requestId, s.MetaData.Key, instanceId, "sendSuc", 0)
 				return
 			} else {
 				return
@@ -548,13 +571,15 @@ func (d *Dispatcher) fastTermCheck() {
 	reqCnt := d.ReqCnt.Load()
 	quickMill := 50 * 60 * 1000
 	if m2.Dev {
-		quickMill = 5 * 60 * 1000
+		quickMill = 4 * 60 * 1000
 	}
 	if now.Sub(d.CreateTime).Milliseconds() > int64(quickMill) {
+		m2.Printf("quickMill:%d,nowmill:%d,submill:%d,dlast:%d,dmax:%d,", quickMill, now.UnixMilli(),
+			now.Sub(d.CreateTime).Milliseconds(), d.Last.Load(), d.Max.Load())
 		if reqCnt > 100000 && now.UnixMilli()-d.Last.Load() > d.Max.Load()+5000 {
 			m2.Printf("fastTerm")
 			d.Term.Store(true)
-		} else if now.UnixMilli()-d.Last.Load() > d.Max.Load()+10000 {
+		} else if now.UnixMilli()-d.Last.Load() > d.Max.Load()+35000 {
 			m2.Printf("fastTerm")
 			d.Term.Store(true)
 		} else if now.UnixMilli()-d.Last.Load() > 122000 {

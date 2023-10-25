@@ -112,6 +112,9 @@ func (s *BaseScheduler) Assign(ctx context.Context, request *pb.AssignRequest) (
 		if it > s.MaxIT {
 			s.MaxIT = it
 		}
+		if it == 0 {
+			it = 1
+		}
 		s.ITTime[(s.ReqCnt-1)%len(s.ITTime)] = start.UnixMilli()
 		s.ITData[(s.ReqCnt-1)%len(s.ITTime)] = it
 		if s.Rule.Valid {
@@ -166,6 +169,9 @@ func (s *BaseScheduler) Idle(ctx context.Context, request *pb.IdleRequest) (*pb.
 	needDestroy := false
 	if request.Result != nil && request.Result.NeedDestroy != nil && *request.Result.NeedDestroy {
 		needDestroy = true
+	}
+	if request.Result.DurationInMs == 0 {
+		request.Result.DurationInMs = 1
 	}
 	s.ITLock.Lock()
 	s.EndCnt += 1
